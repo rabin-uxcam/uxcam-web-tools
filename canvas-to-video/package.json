@@ -1,0 +1,17 @@
+{
+  "name": "canvas-to-video",
+  "version": "1.0.0",
+  "description": "Test tool: loads canvas batch .bin files from MinIO/S3 and converts them to video",
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs",
+    "convert": "node index.mjs",
+    "validate": "node validate-sync.mjs",
+    "player": "open player.html",
+    "serve": "node server.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.500.0",
+    "sharp": "^0.33.0"
+  }
+}
