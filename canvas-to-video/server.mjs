@@ -25,7 +25,7 @@ import {
 } from './index.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
-const PORT = parseInt(process.env.PORT || '5500', 10)
+const PORT = parseInt(process.env.PORT || '5505', 10)
 const OUTPUT_DIR = resolve(__dirname, 'output')
 
 const MIME_TYPES = {
