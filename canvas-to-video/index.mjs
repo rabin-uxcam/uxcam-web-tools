@@ -152,7 +152,7 @@ export async function processSession(batchBuffers, sessionName, opts = {}) {
 	allFrames.sort((a, b) => a.time - b.time)
 
 	const timeSpanMs = allFrames[allFrames.length - 1].time - allFrames[0].time
-	const TARGET_FPS = opts.fps || FPS_OVERRIDE || 60
+	const TARGET_FPS = opts.fps || FPS_OVERRIDE || 5
 
 	// Determine the video canvas size — use the maximum width and height across
 	// all frames so that every frame fits without cropping. Frames that are
