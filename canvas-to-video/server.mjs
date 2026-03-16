@@ -14,7 +14,7 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -22,6 +22,7 @@ import {
 	listBatchFiles,
 	downloadObject,
 	processSession,
+	processSessionVFR,
 } from './index.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -71,10 +72,14 @@ async function handleConvert(req, res) {
 		return sendJson(res, 400, { error: 'Invalid JSON body' })
 	}
 
-	const { sessionId, minioUrl, bucket, prefix } = params
+	const { sessionId, minioUrl, bucket, prefix, mode = 'vfr' } = params
 	if (!sessionId) {
 		return sendJson(res, 400, { error: 'sessionId is required' })
 	}
+
+	// mode: 'cfr' (default, constant frame rate — duplicates frames to fill gaps)
+	//        'vfr' (variable frame rate — uses concat demuxer with per-frame durations)
+	const useVFR = mode === 'vfr'
 
 	const s3Opts = {
 		endpoint: minioUrl || 'http://localhost:9000',
@@ -84,7 +89,7 @@ async function handleConvert(req, res) {
 	const bucketName = bucket || 'uxcam-sessions'
 	const canvasPrefix = prefix || 'sessions/canvas/'
 
-	console.log(`[convert] Session: ${sessionId}, MinIO: ${s3Opts.endpoint}`)
+	console.log(`[convert] Session: ${sessionId}, MinIO: ${s3Opts.endpoint}, Mode: ${useVFR ? 'VFR' : 'CFR'}`)
 
 	try {
 		const s3 = createS3Client(s3Opts)
@@ -106,8 +111,9 @@ async function handleConvert(req, res) {
 			batchBuffers.push({ name: basename(obj.Key), buffer })
 		}
 
-		console.log(`[convert] Running ffmpeg conversion...`)
-		const result = await processSession(batchBuffers, sessionId, { outputDir: OUTPUT_DIR })
+		const converter = useVFR ? processSessionVFR : processSession
+		console.log(`[convert] Running ffmpeg conversion (${useVFR ? 'VFR' : 'CFR'})...`)
+		const result = await converter(batchBuffers, sessionId, { outputDir: OUTPUT_DIR })
 
 		if (!result) {
 			return sendJson(res, 500, { error: 'ffmpeg conversion failed' })
@@ -182,13 +188,30 @@ const server = createServer(async (req, res) => {
 			return await handleMinioProxy(req, res)
 		}
 
-		// Serve static files from output/
-		if (url.pathname.startsWith('/output/')) {
-			const filePath = join(OUTPUT_DIR, url.pathname.replace('/output/', ''))
+		// Serve static files and directory listings from output/
+		if (url.pathname === '/output' || url.pathname.startsWith('/output/')) {
+			const relPath = url.pathname.replace(/^\/output\/?/, '')
+			const filePath = join(OUTPUT_DIR, relPath)
+
+			if (existsSync(filePath) && statSync(filePath).isDirectory()) {
+				// Directory listing as JSON
+				const entries = readdirSync(filePath).map((name) => {
+					const entryPath = join(filePath, name)
+					const stat = statSync(entryPath)
+					return {
+						name,
+						type: stat.isDirectory() ? 'directory' : 'file',
+						size: stat.isFile() ? stat.size : undefined,
+						modified: stat.mtime.toISOString(),
+					}
+				})
+				return sendJson(res, 200, { path: url.pathname, entries })
+			}
+
 			// Range request support for video seeking
 			const range = req.headers.range
 			if (range && extname(filePath) === '.mp4' && existsSync(filePath)) {
-				const { statSync, createReadStream } = await import('node:fs')
+				const { createReadStream } = await import('node:fs')
 				const stat = statSync(filePath)
 				const parts = range.replace(/bytes=/, '').split('-')
 				const start = parseInt(parts[0], 10)

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canvas Batch .bin Visualizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+
+/* Header */
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+.header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; }
+.header .subtitle { font-size: 13px; color: #8b949e; }
+
+/* Drop zone */
+.drop-zone { margin: 24px; border: 2px dashed #30363d; border-radius: 12px; padding: 48px; text-align: center; cursor: pointer; transition: all 0.2s; }
+.drop-zone:hover, .drop-zone.dragover { border-color: #58a6ff; background: rgba(88, 166, 255, 0.05); }
+.drop-zone .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+.drop-zone .label { font-size: 15px; color: #8b949e; margin-bottom: 8px; }
+.drop-zone .hint { font-size: 12px; color: #484f58; }
+.drop-zone input { display: none; }
+
+/* Content */
+.content { padding: 0 24px 24px; display: none; }
+.content.visible { display: block; }
+
+/* Batch info card */
+.batch-info { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+.batch-info h2 { font-size: 16px; color: #f0f6fc; margin-bottom: 12px; }
+.info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.info-item { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 12px; }
+.info-item .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.info-item .value { font-size: 18px; font-weight: 600; color: #58a6ff; }
+.info-item .unit { font-size: 12px; color: #8b949e; font-weight: 400; }
+
+/* Hex view */
+.hex-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+.hex-section h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 12px; }
+.hex-view { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 12px; line-height: 1.6; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 12px; overflow-x: auto; white-space: pre; }
+.hex-view .offset { color: #8b949e; }
+.hex-view .meta-len { color: #f97583; font-weight: 600; }
+.hex-view .meta-json { color: #a5d6ff; }
+.hex-view .frame-data { color: #7ee787; }
+.hex-view .separator { color: #484f58; }
+
+/* Byte map */
+.byte-map { display: flex; gap: 2px; flex-wrap: wrap; margin-top: 12px; padding: 8px; background: #0d1117; border-radius: 6px; }
+.byte-map-pixel { width: 3px; height: 12px; border-radius: 1px; }
+.byte-map-pixel.meta-len { background: #f97583; }
+.byte-map-pixel.meta-json { background: #a5d6ff; }
+.byte-map-pixel.frame-data { background: #7ee787; }
+.byte-map-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 11px; color: #8b949e; }
+.byte-map-legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.byte-map-legend .leg-meta-len::before { background: #f97583; }
+.byte-map-legend .leg-meta-json::before { background: #a5d6ff; }
+.byte-map-legend .leg-frame-data::before { background: #7ee787; }
+
+/* Metadata JSON */
+.meta-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+.meta-section h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 12px; }
+.json-view { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; line-height: 1.5; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 16px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+
+/* Frame timeline */
+.timeline-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+.timeline-section h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 12px; }
+.timeline-bar { position: relative; height: 40px; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
+.timeline-frame { position: absolute; top: 0; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; cursor: pointer; transition: opacity 0.15s; border-right: 1px solid #161b22; }
+.timeline-frame:hover { opacity: 0.8 !important; }
+.timeline-labels { display: flex; justify-content: space-between; font-size: 11px; color: #8b949e; }
+
+/* Frames grid */
+.frames-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+.frames-section h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 16px; }
+.frames-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.frame-card { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; transition: border-color 0.2s; }
+.frame-card:hover { border-color: #58a6ff; }
+.frame-card .frame-img-wrap { position: relative; background: #000; display: flex; align-items: center; justify-content: center; min-height: 140px; }
+.frame-card .frame-img-wrap img { max-width: 100%; max-height: 300px; display: block; }
+.frame-card .frame-img-wrap .frame-badge { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.75); color: #58a6ff; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+.frame-card .frame-meta { padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; }
+.frame-card .frame-meta .key { color: #8b949e; }
+.frame-card .frame-meta .val { color: #c9d1d9; text-align: right; }
+.frame-card .frame-actions { padding: 8px 12px; border-top: 1px solid #21262d; display: flex; gap: 8px; }
+.frame-card .frame-actions button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
+.frame-card .frame-actions button:hover { background: #30363d; }
+
+/* Full preview overlay */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: none; align-items: center; justify-content: center; cursor: zoom-out; }
+.overlay.visible { display: flex; }
+.overlay img { max-width: 95vw; max-height: 95vh; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+.tabs button { background: #21262d; color: #8b949e; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.tabs button:hover { color: #c9d1d9; }
+.tabs button.active { background: #0d1117; color: #58a6ff; border-color: #58a6ff; }
+
+/* Multi-file */
+.file-list { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.file-chip { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.file-chip:hover { border-color: #58a6ff; }
+.file-chip.active { background: #0d1117; border-color: #58a6ff; color: #58a6ff; }
+.file-chip .remove { color: #f85149; font-size: 14px; margin-left: 4px; }
+.file-chip .remove:hover { color: #ff7b72; }
+</style>
+</head>
+<body>
+
+<div class="header">
+	<h1>Canvas Batch .bin Visualizer</h1>
+	<span class="subtitle">Drop or select .bin batch files to inspect their contents</span>
+</div>
+
+<div class="drop-zone" id="dropZone">
+	<div class="icon">&#128230;</div>
+	<div class="label">Drop batch file(s) here or click to browse</div>
+	<div class="hint">Supports binary V2 (gzipped meta), V1 (raw JSON), and JSON (base64 data URLs) &middot; Gzipped or raw &middot; Multiple files OK</div>
+	<input type="file" id="fileInput" accept=".bin,.json,.gz" multiple>
+</div>
+
+<div class="file-list" id="fileList"></div>
+
+<div class="content" id="content">
+	<div class="tabs" id="tabs">
+		<button class="active" data-tab="overview">Overview</button>
+		<button data-tab="hex">Hex &amp; Structure</button>
+		<button data-tab="metadata">Metadata JSON</button>
+		<button data-tab="timeline">Timeline</button>
+		<button data-tab="frames">Frames</button>
+	</div>
+
+	<div id="tab-overview"></div>
+	<div id="tab-hex" style="display:none"></div>
+	<div id="tab-metadata" style="display:none"></div>
+	<div id="tab-timeline" style="display:none"></div>
+	<div id="tab-frames" style="display:none"></div>
+</div>
+
+<div class="overlay" id="overlay">
+	<img id="overlayImg">
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+const loadedFiles = new Map(); // name → { raw, parsed, fileName }
+let activeFile = null;
+
+// ─── Drop zone ───────────────────────────────────────────────────────────────
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+	e.preventDefault();
+	dropZone.classList.remove('dragover');
+	handleFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+
+async function handleFiles(files) {
+	for (const file of files) {
+		const arrayBuf = await file.arrayBuffer();
+		const raw = new Uint8Array(arrayBuf);
+
+		let decompressed;
+		try {
+			const ds = new DecompressionStream('gzip');
+			const reader = new Blob([raw]).stream().pipeThrough(ds).getReader();
+			const chunks = [];
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				chunks.push(value);
+			}
+			const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+			decompressed = new Uint8Array(totalLen);
+			let off = 0;
+			for (const c of chunks) { decompressed.set(c, off); off += c.length; }
+		} catch {
+			decompressed = raw;
+		}
+
+		const parsed = await parseBatch(decompressed);
+		loadedFiles.set(file.name, {
+			fileName: file.name,
+			compressedSize: raw.byteLength,
+			raw: decompressed,
+			parsed,
+		});
+	}
+
+	renderFileList();
+	if (!activeFile && loadedFiles.size > 0) {
+		setActiveFile(loadedFiles.keys().next().value);
+	}
+}
+
+async function parseBatch(buffer) {
+	// JSON format starts with '[' (0x5B)
+	if (buffer[0] === 0x5B) {
+		return parseBatchJSON(buffer);
+	}
+	// Binary format — detect v2 (gzipped JSON header) vs v1 (raw JSON header)
+	return parseBatchBinaryAuto(buffer);
+}
+
+async function parseBatchBinaryAuto(buffer) {
+	const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+	const headerLen = view.getUint32(0, false); // big-endian
+
+	// Check for gzip magic bytes at offset 4
+	if (buffer.length >= 6 && buffer[4] === 0x1F && buffer[5] === 0x8B) {
+		return parseBatchBinaryV2(buffer, headerLen);
+	}
+	return parseBatchBinaryV1(buffer, headerLen);
+}
+
+async function parseBatchBinaryV2(buffer, gzippedJsonLen) {
+	const gzippedJson = buffer.slice(4, 4 + gzippedJsonLen);
+
+	// Decompress gzipped JSON metadata using DecompressionStream
+	const ds = new DecompressionStream('gzip');
+	const reader = new Blob([gzippedJson]).stream().pipeThrough(ds).getReader();
+	const chunks = [];
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		chunks.push(value);
+	}
+	const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+	const jsonBytes = new Uint8Array(totalLen);
+	let off = 0;
+	for (const c of chunks) { jsonBytes.set(c, off); off += c.length; }
+
+	const metaJson = new TextDecoder().decode(jsonBytes);
+	const meta = JSON.parse(metaJson); // [{t, sz, w, h}, ...]
+
+	const dataStart = 4 + gzippedJsonLen;
+	let cursor = 0;
+
+	const frames = meta.map((f, i) => {
+		const frameData = buffer.slice(dataStart + cursor, dataStart + cursor + f.sz);
+		const offset = cursor;
+		cursor += f.sz;
+		return {
+			time: f.t,
+			width: f.w,
+			height: f.h,
+			size: f.sz,
+			offset,
+			data: frameData,
+		};
+	});
+
+	return {
+		format: 'v2',
+		metaLen: gzippedJsonLen,
+		metaLenUncompressed: jsonBytes.byteLength,
+		metaJson,
+		meta: { batchIndex: 0, frames: frames.map(f => ({ time: f.time, width: f.width, height: f.height, offset: f.offset, size: f.size })) },
+		dataStart,
+		batchIndex: 0,
+		frames,
+		totalSize: buffer.byteLength,
+	};
+}
+
+function parseBatchBinaryV1(buffer, metaLen) {
+	const metaBytes = buffer.subarray(4, 4 + metaLen);
+	const metaJson = new TextDecoder().decode(metaBytes);
+	const meta = JSON.parse(metaJson);
+	const dataStart = 4 + metaLen;
+
+	const frames = meta.frames.map((f) => ({
+		...f,
+		data: buffer.slice(dataStart + f.offset, dataStart + f.offset + f.size),
+	}));
+
+	return {
+		format: 'v1',
+		metaLen,
+		metaLenUncompressed: metaLen,
+		metaJson,
+		meta,
+		dataStart,
+		batchIndex: meta.batchIndex,
+		frames,
+		totalSize: buffer.byteLength,
+	};
+}
+
+function parseBatchJSON(buffer) {
+	const json = new TextDecoder().decode(buffer);
+	const changes = JSON.parse(json);
+
+	const frames = changes.map((change, i) => {
+		const dataURL = change.data || change.d;
+		const time = change.time || change.t;
+
+		// Extract base64 from data URL: "data:image/webp;base64,AAAA..."
+		const commaIdx = dataURL.indexOf(',');
+		const base64 = dataURL.substring(commaIdx + 1);
+
+		// Decode base64 to binary
+		const binaryStr = atob(base64);
+		const bytes = new Uint8Array(binaryStr.length);
+		for (let j = 0; j < binaryStr.length; j++) {
+			bytes[j] = binaryStr.charCodeAt(j);
+		}
+
+		return {
+			time,
+			width: 0,
+			height: 0,
+			size: bytes.byteLength,
+			offset: 0,
+			data: bytes,
+		};
+	});
+
+	return {
+		format: 'json',
+		metaLen: 0,
+		metaLenUncompressed: 0,
+		metaJson: json,
+		meta: { batchIndex: 0, frames: frames.map(f => ({ time: f.time, width: f.width, height: f.height, size: f.size })) },
+		dataStart: 0,
+		batchIndex: 0,
+		frames,
+		totalSize: buffer.byteLength,
+	};
+}
+
+// ─── File list chips ─────────────────────────────────────────────────────────
+function renderFileList() {
+	const container = document.getElementById('fileList');
+	container.innerHTML = '';
+	for (const [name, data] of loadedFiles) {
+		const chip = document.createElement('div');
+		chip.className = `file-chip ${name === activeFile ? 'active' : ''}`;
+		chip.innerHTML = `${esc(name)} <span class="remove" title="Remove">&times;</span>`;
+		chip.addEventListener('click', (e) => {
+			if (e.target.classList.contains('remove')) {
+				loadedFiles.delete(name);
+				if (activeFile === name) {
+					activeFile = loadedFiles.size > 0 ? loadedFiles.keys().next().value : null;
+				}
+				renderFileList();
+				if (activeFile) setActiveFile(activeFile);
+				else document.getElementById('content').classList.remove('visible');
+				return;
+			}
+			setActiveFile(name);
+		});
+		container.appendChild(chip);
+	}
+}
+
+function setActiveFile(name) {
+	activeFile = name;
+	renderFileList();
+	renderAll();
+}
+
+// ─── Tabs ────────────────────────────────────────────────────────────────────
+document.getElementById('tabs').addEventListener('click', (e) => {
+	const btn = e.target.closest('button[data-tab]');
+	if (!btn) return;
+	document.querySelectorAll('#tabs button').forEach(b => b.classList.remove('active'));
+	btn.classList.add('active');
+	['overview','hex','metadata','timeline','frames'].forEach(t => {
+		document.getElementById('tab-' + t).style.display = t === btn.dataset.tab ? '' : 'none';
+	});
+});
+
+// ─── Render all tabs ─────────────────────────────────────────────────────────
+function renderAll() {
+	const file = loadedFiles.get(activeFile);
+	if (!file) return;
+	document.getElementById('content').classList.add('visible');
+
+	renderOverview(file);
+	renderHex(file);
+	renderMetadata(file);
+	renderTimeline(file);
+	renderFrames(file);
+}
+
+// ─── Overview tab ────────────────────────────────────────────────────────────
+function renderOverview(file) {
+	const { parsed, compressedSize } = file;
+	const { frames, meta, totalSize, metaLen, dataStart, format } = parsed;
+
+	const times = frames.map(f => f.time).sort((a, b) => a - b);
+	const timeSpan = times.length > 1 ? times[times.length - 1] - times[0] : 0;
+	const totalFrameBytes = frames.reduce((s, f) => s + f.size, 0);
+	const avgFrameSize = frames.length > 0 ? totalFrameBytes / frames.length : 0;
+	const widths = [...new Set(frames.map(f => f.width).filter(w => w > 0))];
+	const heights = [...new Set(frames.map(f => f.height).filter(h => h > 0))];
+	const resolution = widths.length === 0 ? 'Unknown (inferred from image)'
+		: widths.length === 1 && heights.length === 1
+			? `${widths[0]} x ${heights[0]}`
+			: `${Math.min(...widths)}-${Math.max(...widths)} x ${Math.min(...heights)}-${Math.max(...heights)}`;
+
+	const compressionRatio = compressedSize < totalSize
+		? ((1 - compressedSize / totalSize) * 100).toFixed(1) + '%'
+		: 'N/A (not gzipped)';
+
+	const formatLabel = format === 'v2' ? 'Binary V2 (gzipped meta + raw blobs)'
+		: format === 'v1' ? 'Binary V1 (raw JSON + offset blobs)'
+		: 'JSON (base64 data URLs)';
+
+	const metaLabel = format === 'v2'
+		? `Gzipped meta (${formatBytes(metaLen)} → ${formatBytes(parsed.metaLenUncompressed)})`
+		: format === 'v1' ? `Metadata JSON (${formatBytes(metaLen)})` : 'Inline JSON';
+
+	let structureMapHtml = '';
+	if (format !== 'json') {
+		structureMapHtml = `
+		<div class="hex-section">
+			<h3>Binary Structure Map</h3>
+			<div style="font-size:12px; color:#8b949e; margin-bottom:8px">
+				Each pixel = ~${Math.max(1, Math.floor(totalSize / 2000))} bytes
+			</div>
+			<div class="byte-map" id="byteMapOverview"></div>
+			<div class="byte-map-legend">
+				<span class="leg-meta-len">Header length (4 bytes)</span>
+				<span class="leg-meta-json">${metaLabel}</span>
+				<span class="leg-frame-data">Frame data (${formatBytes(totalSize - dataStart)})</span>
+			</div>
+		</div>`;
+	}
+
+	document.getElementById('tab-overview').innerHTML = `
+		<div class="batch-info">
+			<h2>Batch #${meta.batchIndex} &mdash; ${esc(file.fileName)}</h2>
+			<div class="info-grid">
+				<div class="info-item">
+					<div class="label">Format</div>
+					<div class="value" style="font-size:13px">${formatLabel}</div>
+				</div>
+				<div class="info-item">
+					<div class="label">Frames</div>
+					<div class="value">${frames.length}</div>
+				</div>
+				<div class="info-item">
+					<div class="label">Time Span</div>
+					<div class="value">${(timeSpan / 1000).toFixed(2)} <span class="unit">sec</span></div>
+				</div>
+				<div class="info-item">
+					<div class="label">Resolution</div>
+					<div class="value" style="font-size:14px">${resolution} <span class="unit">px</span></div>
+				</div>
+				<div class="info-item">
+					<div class="label">Raw Size</div>
+					<div class="value">${formatBytes(totalSize)}</div>
+				</div>
+				<div class="info-item">
+					<div class="label">Compressed</div>
+					<div class="value">${formatBytes(compressedSize)}</div>
+				</div>
+				<div class="info-item">
+					<div class="label">Compression</div>
+					<div class="value" style="font-size:14px">${compressionRatio}</div>
+				</div>
+				<div class="info-item">
+					<div class="label">Avg Frame</div>
+					<div class="value">${formatBytes(avgFrameSize)}</div>
+				</div>
+			</div>
+		</div>
+		${structureMapHtml}
+	`;
+
+	if (format !== 'json') {
+		renderByteMap('byteMapOverview', totalSize, metaLen, dataStart);
+	}
+}
+
+function renderByteMap(containerId, totalSize, metaLen, dataStart) {
+	const container = document.getElementById(containerId);
+	const maxPixels = 2000;
+	const bytesPerPixel = Math.max(1, Math.ceil(totalSize / maxPixels));
+	const numPixels = Math.ceil(totalSize / bytesPerPixel);
+
+	let html = '';
+	for (let i = 0; i < numPixels; i++) {
+		const bytePos = i * bytesPerPixel;
+		let cls;
+		if (bytePos < 4) cls = 'meta-len';
+		else if (bytePos < 4 + metaLen) cls = 'meta-json';
+		else cls = 'frame-data';
+		html += `<div class="byte-map-pixel ${cls}" title="Offset: ${bytePos}"></div>`;
+	}
+	container.innerHTML = html;
+}
+
+// ─── Hex tab ─────────────────────────────────────────────────────────────────
+function renderHex(file) {
+	const { raw, parsed } = file;
+	const { metaLen, dataStart, format } = parsed;
+
+	if (format === 'json') {
+		// JSON format — just show breakdown, no hex dump of binary structure
+		document.getElementById('tab-hex').innerHTML = `
+			<div class="hex-section">
+				<h3>Wire Format Breakdown</h3>
+				<div class="json-view">${esc(wireFormatBreakdown(parsed))}</div>
+			</div>
+		`;
+		return;
+	}
+
+	// Show first 512 bytes of hex + ascii
+	const hexLines = [];
+	const showBytes = Math.min(raw.byteLength, 512);
+	for (let off = 0; off < showBytes; off += 16) {
+		const slice = raw.subarray(off, Math.min(off + 16, showBytes));
+		let hexPart = '';
+		let asciiPart = '';
+		for (let i = 0; i < 16; i++) {
+			if (i < slice.length) {
+				const b = slice[i];
+				const bytePos = off + i;
+				let cls;
+				if (bytePos < 4) cls = 'meta-len';
+				else if (bytePos < 4 + metaLen) cls = 'meta-json';
+				else cls = 'frame-data';
+				hexPart += `<span class="${cls}">${hex(b)}</span> `;
+				asciiPart += printable(b);
+			} else {
+				hexPart += '   ';
+				asciiPart += ' ';
+			}
+			if (i === 7) hexPart += ' ';
+		}
+		hexLines.push(`<span class="offset">${hex32(off)}</span>  ${hexPart} <span class="separator">|</span>${asciiPart}<span class="separator">|</span>`);
+	}
+
+	if (raw.byteLength > showBytes) {
+		hexLines.push(`<span class="offset">... ${formatBytes(raw.byteLength - showBytes)} more ...</span>`);
+	}
+
+	const metaDesc = format === 'v2'
+		? `<span style="color:#a5d6ff">Blue</span> = gzipped JSON metadata (bytes 4-${4 + metaLen - 1}, ${formatBytes(metaLen)} → ${formatBytes(parsed.metaLenUncompressed)} uncompressed)`
+		: `<span style="color:#a5d6ff">Blue</span> = metadata JSON (bytes 4-${4 + metaLen - 1})`;
+
+	document.getElementById('tab-hex').innerHTML = `
+		<div class="hex-section">
+			<h3>Hex Dump (first 512 bytes)</h3>
+			<div style="font-size:11px; color:#8b949e; margin-bottom:8px">
+				<span style="color:#f97583">Red</span> = header length (bytes 0-3, big-endian uint32 = ${metaLen})
+				&middot; ${metaDesc}
+				&middot; <span style="color:#7ee787">Green</span> = frame blob data (bytes ${dataStart}+)
+			</div>
+			<div class="hex-view">${hexLines.join('\n')}</div>
+		</div>
+
+		<div class="hex-section">
+			<h3>Wire Format Breakdown</h3>
+			<div class="json-view">${esc(wireFormatBreakdown(parsed))}</div>
+		</div>
+	`;
+}
+
+function wireFormatBreakdown(parsed) {
+	const { metaLen, meta, dataStart, totalSize, frames, format } = parsed;
+	let out = `Total binary size: ${totalSize} bytes\nFormat: ${format}\n\n`;
+
+	if (format === 'v2') {
+		out += `Section 1: Gzipped JSON Length\n`;
+		out += `  Offset: 0\n  Size:   4 bytes (big-endian uint32)\n  Value:  ${metaLen} (gzipped) → ${parsed.metaLenUncompressed} (raw)\n\n`;
+		out += `Section 2: Gzipped JSON Metadata\n`;
+		out += `  Offset: 4\n  Size:   ${metaLen} bytes (gzip-compressed)\n  Schema: [{t, sz, w, h}, ...] (${frames.length} entries)\n\n`;
+		out += `Section 3: Raw WebP Blobs (sequential)\n`;
+		out += `  Offset: ${dataStart}\n  Size:   ${totalSize - dataStart} bytes\n  Frames:\n`;
+		frames.forEach((f, i) => {
+			out += `    [${i}] cursor=${f.offset}, sz=${f.size} bytes (${formatBytes(f.size)}), t=${f.time}, ${f.width}x${f.height}\n`;
+		});
+	} else if (format === 'v1') {
+		out += `Section 1: Metadata Length\n`;
+		out += `  Offset: 0\n  Size:   4 bytes (big-endian uint32)\n  Value:  ${metaLen}\n\n`;
+		out += `Section 2: Metadata JSON\n`;
+		out += `  Offset: 4\n  Size:   ${metaLen} bytes\n  Fields: batchIndex=${meta.batchIndex}, frames=${meta.frames.length}\n\n`;
+		out += `Section 3: Frame Blob Data\n`;
+		out += `  Offset: ${dataStart}\n  Size:   ${totalSize - dataStart} bytes\n  Frames:\n`;
+		frames.forEach((f, i) => {
+			out += `    [${i}] offset=${f.offset}, size=${f.size} bytes (${formatBytes(f.size)}), time=${f.time}, ${f.width}x${f.height}\n`;
+		});
+	} else {
+		out += `JSON array of ${frames.length} change objects with inline base64 data URLs.\n`;
+		out += `Total decoded frame data: ${formatBytes(frames.reduce((s, f) => s + f.size, 0))}\n\n`;
+		out += `Frames:\n`;
+		frames.forEach((f, i) => {
+			out += `  [${i}] size=${f.size} bytes (${formatBytes(f.size)}), time=${f.time}\n`;
+		});
+	}
+	return out;
+}
+
+// ─── Metadata tab ────────────────────────────────────────────────────────────
+function renderMetadata(file) {
+	const { parsed } = file;
+	const { format } = parsed;
+
+	let sizeLabel;
+	if (format === 'v2') {
+		sizeLabel = `Gzipped: ${formatBytes(parsed.metaLen)} → Uncompressed: ${formatBytes(parsed.metaLenUncompressed)}`;
+	} else if (format === 'v1') {
+		sizeLabel = formatBytes(parsed.metaLen);
+	} else {
+		sizeLabel = `${formatBytes(parsed.totalSize)} (full JSON)`;
+	}
+
+	// For JSON format, show first 2000 chars to avoid huge rendering
+	let displayJson = parsed.metaJson;
+	let truncated = false;
+	if (displayJson.length > 5000) {
+		displayJson = displayJson.substring(0, 5000);
+		truncated = true;
+	}
+
+	const formatted = (() => {
+		try { return JSON.stringify(JSON.parse(displayJson), null, 2); }
+		catch { return displayJson; }
+	})();
+
+	document.getElementById('tab-metadata').innerHTML = `
+		<div class="meta-section">
+			<h3>Metadata JSON (${sizeLabel})</h3>
+			<div class="json-view">${syntaxHighlight(formatted)}${truncated ? '\n\n... truncated ...' : ''}</div>
+		</div>
+	`;
+}
+
+// ─── Timeline tab ────────────────────────────────────────────────────────────
+function renderTimeline(file) {
+	const { parsed } = file;
+	const { frames } = parsed;
+
+	if (frames.length === 0) {
+		document.getElementById('tab-timeline').innerHTML = '<div class="timeline-section"><h3>No frames</h3></div>';
+		return;
+	}
+
+	const times = frames.map(f => f.time);
+	const minTime = Math.min(...times);
+	const maxTime = Math.max(...times);
+	const span = maxTime - minTime || 1;
+
+	const colors = ['#58a6ff','#3fb950','#d2a8ff','#f0883e','#f778ba','#79c0ff','#7ee787','#ffa657'];
+
+	let barHtml = '';
+	for (let i = 0; i < frames.length; i++) {
+		const f = frames[i];
+		const left = ((f.time - minTime) / span) * 100;
+		const nextTime = i + 1 < frames.length ? frames[i + 1].time : f.time + 200;
+		const width = Math.max(0.5, ((nextTime - f.time) / span) * 100);
+		const color = colors[i % colors.length];
+		barHtml += `<div class="timeline-frame" style="left:${left}%;width:${width}%;background:${color};opacity:0.7" title="Frame ${i}: time=${f.time}, ${formatBytes(f.size)}">${i}</div>`;
+	}
+
+	// Frame gap analysis
+	let gapHtml = '<table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:12px">';
+	gapHtml += '<tr style="color:#8b949e"><th style="text-align:left;padding:4px">Frame</th><th style="text-align:right;padding:4px">Time</th><th style="text-align:right;padding:4px">Gap</th><th style="text-align:right;padding:4px">Size</th></tr>';
+	for (let i = 0; i < frames.length; i++) {
+		const f = frames[i];
+		const gap = i > 0 ? f.time - frames[i - 1].time : 0;
+		const gapColor = gap > 1000 ? '#f85149' : gap > 500 ? '#f0883e' : '#8b949e';
+		gapHtml += `<tr style="border-top:1px solid #21262d"><td style="padding:4px">#${i}</td><td style="text-align:right;padding:4px">${f.time}</td><td style="text-align:right;padding:4px;color:${gapColor}">${i > 0 ? '+' + gap + 'ms' : '--'}</td><td style="text-align:right;padding:4px">${formatBytes(f.size)}</td></tr>`;
+	}
+	gapHtml += '</table>';
+
+	document.getElementById('tab-timeline').innerHTML = `
+		<div class="timeline-section">
+			<h3>Frame Timeline</h3>
+			<div class="timeline-bar">${barHtml}</div>
+			<div class="timeline-labels">
+				<span>${minTime}ms</span>
+				<span>span: ${(span / 1000).toFixed(2)}s (${frames.length} frames)</span>
+				<span>${maxTime}ms</span>
+			</div>
+		</div>
+		<div class="timeline-section">
+			<h3>Frame Gap Analysis</h3>
+			${gapHtml}
+		</div>
+	`;
+}
+
+// ─── Frames tab ──────────────────────────────────────────────────────────────
+function renderFrames(file) {
+	const { parsed } = file;
+	const { frames } = parsed;
+
+	let html = '<div class="frames-section"><h3>Extracted Frames</h3><div class="frames-grid">';
+
+	for (let i = 0; i < frames.length; i++) {
+		const f = frames[i];
+		const blob = new Blob([f.data], { type: detectImageType(f.data) });
+		const url = URL.createObjectURL(blob);
+
+		const gap = i > 0 ? frames[i].time - frames[i - 1].time : 0;
+
+		html += `
+		<div class="frame-card">
+			<div class="frame-img-wrap">
+				<img src="${url}" loading="lazy" onclick="showOverlay('${url}')">
+				<div class="frame-badge">Frame #${i}</div>
+			</div>
+			<div class="frame-meta">
+				<span class="key">Time</span><span class="val">${f.time}ms</span>
+				<span class="key">Size</span><span class="val">${formatBytes(f.size)}</span>
+				<span class="key">Dimensions</span><span class="val">${f.width && f.height ? f.width + ' x ' + f.height : 'From image'}</span>
+				<span class="key">Gap from prev</span><span class="val">${i > 0 ? gap + 'ms' : '--'}</span>
+				${f.offset !== undefined ? `<span class="key">Blob offset</span><span class="val">${f.offset}</span>` : ''}
+				<span class="key">Image type</span><span class="val">${detectImageType(f.data)}</span>
+			</div>
+			<div class="frame-actions">
+				<button onclick="downloadFrame('${url}', 'frame-${i}.${detectExt(f.data)}')">Download</button>
+				<button onclick="showOverlay('${url}')">Full Size</button>
+			</div>
+		</div>`;
+	}
+
+	html += '</div></div>';
+	document.getElementById('tab-frames').innerHTML = html;
+}
+
+// ─── Image type detection ────────────────────────────────────────────────────
+function detectImageType(data) {
+	if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) return 'image/png';
+	if (data[0] === 0xFF && data[1] === 0xD8) return 'image/jpeg';
+	if (data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) return 'image/webp';
+	return 'image/webp'; // default for our pipeline
+}
+
+function detectExt(data) {
+	const type = detectImageType(data);
+	if (type === 'image/png') return 'png';
+	if (type === 'image/jpeg') return 'jpg';
+	return 'webp';
+}
+
+// ─── Overlay ─────────────────────────────────────────────────────────────────
+const overlay = document.getElementById('overlay');
+const overlayImg = document.getElementById('overlayImg');
+overlay.addEventListener('click', () => overlay.classList.remove('visible'));
+
+function showOverlay(url) {
+	overlayImg.src = url;
+	overlay.classList.add('visible');
+}
+
+function downloadFrame(url, filename) {
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = filename;
+	a.click();
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function formatBytes(bytes) {
+	if (bytes < 1024) return bytes + ' B';
+	if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+	return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function hex(b) { return b.toString(16).padStart(2, '0'); }
+function hex32(n) { return n.toString(16).padStart(8, '0'); }
+function printable(b) { return b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.'; }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function syntaxHighlight(json) {
+	return esc(json)
+		.replace(/"([^"]+)":/g, '<span style="color:#79c0ff">"$1"</span>:')
+		.replace(/: "([^"]*)"/g, ': <span style="color:#a5d6ff">"$1"</span>')
+		.replace(/: (\d+)/g, ': <span style="color:#f0883e">$1</span>');
+}
+
+// ─── Keyboard ────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+	if (e.key === 'Escape') overlay.classList.remove('visible');
+});
+</script>
+</body>
+</html>
