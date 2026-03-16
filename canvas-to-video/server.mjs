@@ -5,24 +5,26 @@
  *
  * - Serves player.html at GET /
  * - Serves output MP4s at GET /output/*
- * - POST /convert  → runs the same ffmpeg pipeline as index.mjs
- * - GET  /minio/*  → proxies to MinIO (avoids browser CORS issues)
+ * - GET  /strategies → list all registered conversion strategies
+ * - POST /convert    → convert a session with a specific strategy
+ * - POST /benchmark  → convert a session with ALL strategies for comparison
+ * - GET  /minio/*    → proxies to MinIO (avoids browser CORS issues)
  *
  * Usage:
- *   node server.mjs                         # default port 3000
+ *   node server.mjs                         # default port 5505
  *   PORT=8080 node server.mjs               # custom port
  */
 
 import { createServer } from 'node:http'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
-import { join, resolve, extname } from 'node:path'
+import { join, resolve, extname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
 	createS3Client,
 	listBatchFiles,
 	downloadObject,
-	processSession,
-	processSessionVFR,
+	getStrategy,
+	getAllStrategies,
 } from './index.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
@@ -39,6 +41,8 @@ const MIME_TYPES = {
 	'.png': 'image/png',
 	'.webp': 'image/webp',
 }
+
+// ─── Response helpers ───────────────────────────────────────────────────────
 
 function sendJson(res, statusCode, data) {
 	res.writeHead(statusCode, { 'Content-Type': 'application/json' })
@@ -61,6 +65,55 @@ function sendFile(res, filePath) {
 	res.end(content)
 }
 
+// ─── Strategy ID normalization ──────────────────────────────────────────────
+
+function normalizeStrategyId(mode) {
+	if (mode === 'cfr') return 'cfr-v1'
+	if (mode === 'vfr') return 'vfr-v1'
+	if (mode === 'vfr-v2') return 'vfr-v2'
+	if (mode === 'vfr-v3') return 'vfr-v3'
+	return mode
+}
+
+// ─── Shared: download batch files for a session ─────────────────────────────
+
+async function downloadBatchFiles(params) {
+	const s3Opts = {
+		endpoint: params.minioUrl || 'http://localhost:9000',
+		accessKey: params.accessKey || 'minioadmin',
+		secretKey: params.secretKey || 'minioadmin',
+	}
+	const bucketName = params.bucket || 'uxcam-sessions'
+	const canvasPrefix = params.prefix || 'sessions/canvas/'
+
+	const s3 = createS3Client(s3Opts)
+	const sessionPrefix = `${canvasPrefix}${params.sessionId}/`
+	const objects = await listBatchFiles(s3, sessionPrefix, { bucket: bucketName })
+
+	if (objects.length === 0) return null
+
+	console.log(`[server] Downloading ${objects.length} batch file(s)...`)
+	const batchBuffers = []
+	for (const obj of objects) {
+		const buffer = await downloadObject(s3, obj.Key, { bucket: bucketName })
+		batchBuffers.push({ name: basename(obj.Key), buffer })
+	}
+	return batchBuffers
+}
+
+// ─── GET /strategies ────────────────────────────────────────────────────────
+
+function handleListStrategies(_req, res) {
+	const strategies = getAllStrategies().map((s) => ({
+		id: s.id,
+		name: s.name,
+		description: s.description,
+	}))
+	sendJson(res, 200, { strategies })
+}
+
+// ─── POST /convert ──────────────────────────────────────────────────────────
+
 async function handleConvert(req, res) {
 	let body = ''
 	for await (const chunk of req) body += chunk
@@ -72,68 +125,129 @@ async function handleConvert(req, res) {
 		return sendJson(res, 400, { error: 'Invalid JSON body' })
 	}
 
-	const { sessionId, minioUrl, bucket, prefix, mode = 'vfr' } = params
+	const { sessionId, mode = 'vfr-v3' } = params
 	if (!sessionId) {
 		return sendJson(res, 400, { error: 'sessionId is required' })
 	}
 
-	// mode: 'cfr' (default, constant frame rate — duplicates frames to fill gaps)
-	//        'vfr' (variable frame rate — uses concat demuxer with per-frame durations)
-	const useVFR = mode === 'vfr'
-
-	const s3Opts = {
-		endpoint: minioUrl || 'http://localhost:9000',
-		accessKey: params.accessKey || 'minioadmin',
-		secretKey: params.secretKey || 'minioadmin',
+	const strategyId = normalizeStrategyId(mode)
+	const strategy = getStrategy(strategyId)
+	if (!strategy) {
+		const available = getAllStrategies().map((s) => s.id).join(', ')
+		return sendJson(res, 400, { error: `Unknown strategy: ${mode}. Available: ${available}` })
 	}
-	const bucketName = bucket || 'uxcam-sessions'
-	const canvasPrefix = prefix || 'sessions/canvas/'
 
-	console.log(`[convert] Session: ${sessionId}, MinIO: ${s3Opts.endpoint}, Mode: ${useVFR ? 'VFR' : 'CFR'}`)
+	console.log(`[convert] Session: ${sessionId}, Strategy: ${strategy.name}`)
 
 	try {
-		const s3 = createS3Client(s3Opts)
-
-		// List batch files for this session
-		const sessionPrefix = `${canvasPrefix}${sessionId}/`
-		const objects = await listBatchFiles(s3, sessionPrefix, { bucket: bucketName })
-
-		if (objects.length === 0) {
+		const batchBuffers = await downloadBatchFiles(params)
+		if (!batchBuffers) {
 			return sendJson(res, 404, { error: 'No batch files found for this session' })
 		}
 
-		console.log(`[convert] Downloading ${objects.length} batch file(s)...`)
-
-		const { basename } = await import('node:path')
-		const batchBuffers = []
-		for (const obj of objects) {
-			const buffer = await downloadObject(s3, obj.Key, { bucket: bucketName })
-			batchBuffers.push({ name: basename(obj.Key), buffer })
-		}
-
-		const converter = useVFR ? processSessionVFR : processSession
-		console.log(`[convert] Running ffmpeg conversion (${useVFR ? 'VFR' : 'CFR'})...`)
-		const result = await converter(batchBuffers, sessionId, { outputDir: OUTPUT_DIR })
+		const startMs = Date.now()
+		const result = await strategy.convert(batchBuffers, sessionId, { outputDir: OUTPUT_DIR })
+		const encodingTimeMs = Date.now() - startMs
 
 		if (!result) {
-			return sendJson(res, 500, { error: 'ffmpeg conversion failed' })
+			return sendJson(res, 500, { error: 'Conversion failed' })
 		}
 
 		const videoUrl = `/output/${sessionId}/${sessionId}.mp4`
-		console.log(`[convert] Done → ${videoUrl}`)
-		sendJson(res, 200, { videoUrl, ...result })
+		console.log(`[convert] Done → ${videoUrl} (${encodingTimeMs}ms)`)
+		sendJson(res, 200, {
+			strategy: strategy.id,
+			strategyName: strategy.name,
+			videoUrl,
+			encodingTimeMs,
+			...result,
+		})
 	} catch (err) {
 		console.error(`[convert] Error:`, err)
 		sendJson(res, 500, { error: err.message })
 	}
 }
 
+// ─── POST /benchmark ────────────────────────────────────────────────────────
+
+async function handleBenchmark(req, res) {
+	let body = ''
+	for await (const chunk of req) body += chunk
+
+	let params
+	try {
+		params = JSON.parse(body)
+	} catch {
+		return sendJson(res, 400, { error: 'Invalid JSON body' })
+	}
+
+	const { sessionId } = params
+	if (!sessionId) {
+		return sendJson(res, 400, { error: 'sessionId is required' })
+	}
+
+	console.log(`[benchmark] Session: ${sessionId}`)
+
+	try {
+		const batchBuffers = await downloadBatchFiles(params)
+		if (!batchBuffers) {
+			return sendJson(res, 404, { error: 'No batch files found for this session' })
+		}
+
+		console.log(`[benchmark] Running all strategies...`)
+
+		const strategies = getAllStrategies()
+		const settled = await Promise.allSettled(
+			strategies.map(async (strategy) => {
+				const benchDir = join(OUTPUT_DIR, `${sessionId}-bench`)
+				const sessionLabel = `${sessionId}--${strategy.id}`
+				const startMs = Date.now()
+
+				const result = await strategy.convert(batchBuffers, sessionLabel, { outputDir: benchDir })
+				const encodingTimeMs = Date.now() - startMs
+
+				if (!result) {
+					return {
+						strategy: strategy.id,
+						name: strategy.name,
+						description: strategy.description,
+						error: 'Conversion failed',
+						encodingTimeMs,
+					}
+				}
+
+				return {
+					strategy: strategy.id,
+					name: strategy.name,
+					description: strategy.description,
+					videoUrl: `/output/${sessionId}-bench/${sessionLabel}/${sessionLabel}.mp4`,
+					encodingTimeMs,
+					frameCount: result.frameCount,
+					videoFrameCount: result.videoFrameCount,
+					videoSizeBytes: result.videoSizeBytes,
+				}
+			})
+		)
+
+		const results = settled.map((r) =>
+			r.status === 'fulfilled'
+				? r.value
+				: { error: r.reason?.message || 'Unknown error' }
+		)
+
+		console.log(`[benchmark] Complete — ${results.length} strategies`)
+		sendJson(res, 200, { sessionId, results })
+	} catch (err) {
+		console.error('[benchmark] Error:', err)
+		sendJson(res, 500, { error: err.message })
+	}
+}
+
+// ─── GET /minio/* — proxy to MinIO ─────────────────────────────────────────
+
 async function handleMinioProxy(req, res) {
-	// GET /minio/<minioHost>/<path...>
-	// e.g. /minio/localhost:9000/uxcam-sessions?list-type=2&prefix=sessions/canvas/
 	const url = new URL(req.url, `http://localhost:${PORT}`)
 	const stripped = url.pathname.replace(/^\/minio\//, '')
-	// First segment is the host (possibly with port)
 	const slashIdx = stripped.indexOf('/')
 	if (slashIdx === -1) {
 		res.writeHead(400)
@@ -158,8 +272,9 @@ async function handleMinioProxy(req, res) {
 	}
 }
 
+// ─── Server ─────────────────────────────────────────────────────────────────
+
 const server = createServer(async (req, res) => {
-	// CORS headers for all responses
 	res.setHeader('Access-Control-Allow-Origin', '*')
 	res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
 	res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
@@ -178,9 +293,19 @@ const server = createServer(async (req, res) => {
 			return sendFile(res, join(__dirname, 'player.html'))
 		}
 
+		// GET /strategies
+		if (req.method === 'GET' && url.pathname === '/strategies') {
+			return handleListStrategies(req, res)
+		}
+
 		// POST /convert
 		if (req.method === 'POST' && url.pathname === '/convert') {
 			return await handleConvert(req, res)
+		}
+
+		// POST /benchmark
+		if (req.method === 'POST' && url.pathname === '/benchmark') {
+			return await handleBenchmark(req, res)
 		}
 
 		// GET /minio/* — proxy to MinIO
@@ -194,7 +319,6 @@ const server = createServer(async (req, res) => {
 			const filePath = join(OUTPUT_DIR, relPath)
 
 			if (existsSync(filePath) && statSync(filePath).isDirectory()) {
-				// Directory listing as JSON
 				const entries = readdirSync(filePath).map((name) => {
 					const entryPath = join(filePath, name)
 					const stat = statSync(entryPath)
@@ -240,8 +364,10 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
 	console.log(`Canvas-to-Video Player Server`)
-	console.log(`  Player:  http://localhost:${PORT}`)
-	console.log(`  Convert: POST http://localhost:${PORT}/convert`)
+	console.log(`  Player:     http://localhost:${PORT}`)
+	console.log(`  Strategies: GET  http://localhost:${PORT}/strategies`)
+	console.log(`  Convert:    POST http://localhost:${PORT}/convert`)
+	console.log(`  Benchmark:  POST http://localhost:${PORT}/benchmark`)
 	console.log(`  MinIO proxy: http://localhost:${PORT}/minio/<host>/<path>`)
 	console.log()
 })

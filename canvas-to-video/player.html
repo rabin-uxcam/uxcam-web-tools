@@ -8,6 +8,14 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
 
+/* Tab bar */
+.tab-bar { display: flex; background: #16213e; border-bottom: 2px solid #0f3460; }
+.tab { padding: 8px 24px; font-size: 13px; cursor: pointer; color: #888; border-bottom: 2px solid transparent; margin-bottom: -2px; user-select: none; }
+.tab:hover { color: #bbb; }
+.tab.active { color: #5dade2; border-bottom-color: #5dade2; }
+.tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+.tab-panel.active { display: flex; }
+
 /* Header */
 .header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: #16213e; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
 .header label { font-size: 13px; color: #aaa; }
@@ -16,6 +24,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .header input { width: 280px; }
 .header button { background: #0f3460; color: #e0e0e0; border: none; border-radius: 4px; padding: 6px 16px; font-size: 13px; cursor: pointer; }
 .header button:hover { background: #1a5276; }
+.header button:disabled { opacity: 0.5; cursor: not-allowed; }
 .header .status { margin-left: auto; font-size: 12px; color: #888; }
 
 /* Main area */
@@ -73,9 +82,38 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .loading .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #5dade2; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading .progress-text { font-size: 13px; color: #aaa; }
+
+/* ─── Benchmark panel ────────────────────────────────────────────────────── */
+.bench-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.bench-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 40px; }
+.bench-loading.hidden { display: none; }
+.bench-loading .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #5dade2; border-radius: 50%; animation: spin 0.8s linear infinite; }
+.bench-results { flex: 1; overflow-y: auto; padding: 16px; }
+.bench-results:empty::after { content: 'Select a session and click "Run Benchmark" to compare strategies.'; color: #555; font-size: 13px; }
+.bench-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.bench-table th { text-align: left; padding: 10px 12px; background: #0f3460; color: #aaa; font-weight: 600; text-transform: uppercase; font-size: 11px; position: sticky; top: 0; }
+.bench-table td { padding: 10px 12px; border-bottom: 1px solid #0f3460; vertical-align: top; }
+.bench-table tr.best td { background: rgba(46, 204, 113, 0.08); }
+.bench-table .strategy-name { font-weight: 600; color: #e0e0e0; }
+.bench-table .strategy-desc { color: #888; font-size: 11px; margin-top: 2px; }
+.bench-table .size-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+.bench-table .size-badge.smallest { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
+.bench-video-cell video { max-width: 280px; max-height: 160px; border-radius: 4px; cursor: pointer; background: #000; }
+.bench-error { color: #e74c3c; font-size: 12px; }
 </style>
 </head>
 <body>
+
+<!-- Tab bar -->
+<div class="tab-bar">
+	<div class="tab active" data-tab="player">Player</div>
+	<div class="tab" data-tab="benchmark">Benchmark</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Player tab -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-panel active" id="panel-player">
 
 <div class="header">
 	<label>MinIO:</label>
@@ -122,8 +160,50 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 	</div>
 </div>
 
+</div><!-- /panel-player -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Benchmark tab -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-benchmark">
+
+<div class="header">
+	<label>MinIO:</label>
+	<input type="text" id="benchMinioUrl" value="http://localhost:9000" placeholder="MinIO endpoint">
+	<button id="benchListBtn">List</button>
+	<label>Session:</label>
+	<select id="benchSessionSelect"><option value="">-- click List --</option></select>
+	<button id="benchRunBtn" disabled>Run Benchmark</button>
+	<span class="status" id="benchStatus"></span>
+</div>
+
+<div class="bench-content">
+	<div class="bench-loading hidden" id="benchLoading">
+		<div class="spinner"></div>
+		<div class="progress-text" id="benchLoadingText">Running all strategies...</div>
+	</div>
+	<div class="bench-results" id="benchResults"></div>
+</div>
+
+</div><!-- /panel-benchmark -->
+
 <script>
-// ─── State ───────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab switching
+// ═══════════════════════════════════════════════════════════════════════════
+
+document.querySelectorAll('.tab').forEach(tab => {
+	tab.addEventListener('click', () => {
+		document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+		document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+		tab.classList.add('active');
+		document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active');
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Player tab — State
+// ═══════════════════════════════════════════════════════════════════════════
 
 let dataJson = null;
 let screenTimeline = [];	// st[]
@@ -135,15 +215,13 @@ let rafId = null;
 const video = document.getElementById('playerVideo');
 const MINIO_BUCKET = 'uxcam-sessions';
 
-// Detect if served from the dev server (has /convert endpoint) or opened as file
 const isDevServer = location.protocol.startsWith('http');
 
 // ─── MinIO helpers (proxy through server to avoid CORS) ─────────────────────
 
-function minioBase() {
-	const raw = document.getElementById('minioUrl').value.replace(/\/+$/, '');
+function minioBase(urlInputId) {
+	const raw = document.getElementById(urlInputId || 'minioUrl').value.replace(/\/+$/, '');
 	if (!isDevServer) return raw;
-	// Proxy through server: http://localhost:9000 → /minio/localhost:9000
 	try {
 		const u = new URL(raw);
 		return `/minio/${u.host}`;
@@ -152,8 +230,8 @@ function minioBase() {
 	}
 }
 
-async function minioList(prefix, delimiter) {
-	let url = `${minioBase()}/${MINIO_BUCKET}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
+async function minioList(prefix, delimiter, urlInputId) {
+	let url = `${minioBase(urlInputId)}/${MINIO_BUCKET}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
 	if (delimiter) url += `&delimiter=${encodeURIComponent(delimiter)}`;
 	const resp = await fetch(url);
 	const text = await resp.text();
@@ -179,7 +257,6 @@ async function listAll() {
 	setStatus('Listing MinIO contents...');
 
 	try {
-		// List canvas sessions
 		const canvasXml = await minioList('sessions/canvas/', '/');
 		const prefixes = [...canvasXml.querySelectorAll('CommonPrefixes > Prefix')];
 		sessionSelect.innerHTML = '';
@@ -197,7 +274,6 @@ async function listAll() {
 			sessionSelect.selectedIndex = sessionSelect.options.length - 1;
 		}
 
-		// List data.json files from sessions/data/ prefix
 		const dataXml = await minioList('sessions/data/', null);
 		const allKeys = [...dataXml.querySelectorAll('Contents > Key')].map(k => k.textContent);
 		const dataFiles = allKeys.filter(k => k.endsWith('.json') || k.endsWith('.json.gz'));
@@ -217,7 +293,6 @@ async function listAll() {
 				opt.textContent = key;
 				dataSelect.appendChild(opt);
 			});
-			// Auto-select last data file
 			dataSelect.selectedIndex = dataSelect.options.length - 1;
 		}
 
@@ -242,7 +317,6 @@ async function loadSession() {
 	dataJson = null;
 
 	try {
-		// 1. Call server to convert batches → MP4 via ffmpeg
 		showLoading('Converting canvas frames to MP4 (ffmpeg)...');
 		const minioUrl = document.getElementById('minioUrl').value.replace(/\/+$/, '');
 
@@ -259,7 +333,6 @@ async function loadSession() {
 
 		const { videoUrl, frameCount, videoFrameCount, videoSizeBytes } = await convertResp.json();
 
-		// 2. Load video
 		showLoading('Loading video...');
 		await new Promise((resolve, reject) => {
 			video.oncanplay = () => { video.oncanplay = null; resolve(); };
@@ -268,7 +341,6 @@ async function loadSession() {
 			video.load();
 		});
 
-		// 3. Load data.json
 		showLoading('Loading data.json...');
 		const dataKey = document.getElementById('dataSelect').value;
 
@@ -291,12 +363,10 @@ async function loadSession() {
 			setStatus(`Loaded: video (${(video.duration || 0).toFixed(1)}s), no data.json found`);
 		}
 
-		// If data.json didn't provide totalTimeMs, use video duration
 		if (totalTimeMs <= 0) {
 			totalTimeMs = (video.duration || 0) * 1000;
 		}
 
-		// 4. Setup player
 		setupPlayer();
 		hideLoading();
 
@@ -311,7 +381,6 @@ async function fetchDataJsonByKey(key) {
 	const resp = await minioGet(key);
 	const rawBuf = await resp.arrayBuffer();
 
-	// Try gzip first, fall back to plain JSON
 	try {
 		const ds = new DecompressionStream('gzip');
 		const reader = new Blob([rawBuf]).stream().pipeThrough(ds).getReader();
@@ -362,28 +431,19 @@ function setupPlayer() {
 	video.playbackRate = playbackSpeed;
 	document.getElementById('playBtn').innerHTML = '&#9654;';
 
-	// Build timeline markers
 	buildTimeline();
-
-	// Build event log
 	buildEventLog();
-
-	// Update display
 	updateTimeDisplay();
 	updateOverlays();
-
-	// Start overlay sync loop
 	startOverlaySync();
 }
 
 function buildTimeline() {
 	const wrap = document.getElementById('timelineWrap');
-	// Remove old markers
 	wrap.querySelectorAll('.timeline-marker').forEach(m => m.remove());
 
 	if (totalTimeMs <= 0) return;
 
-	// Event markers (orange)
 	events.forEach(evt => {
 		const pct = (evt.time * 1000 / totalTimeMs) * 100;
 		const m = document.createElement('div');
@@ -393,7 +453,6 @@ function buildTimeline() {
 		wrap.appendChild(m);
 	});
 
-	// Screen transition markers (green)
 	screenTimeline.forEach(s => {
 		const pct = (s.at * 1000 / totalTimeMs) * 100;
 		const m = document.createElement('div');
@@ -423,7 +482,7 @@ function buildEventLog() {
 	});
 }
 
-// ─── Playback (via <video> element) ──────────────────────────────────────────
+// ─── Playback ────────────────────────────────────────────────────────────────
 
 function play() {
 	video.play();
@@ -440,7 +499,6 @@ function seekTo(timeSec) {
 	updateOverlays();
 }
 
-// Sync overlays with video playback using requestAnimationFrame
 function startOverlaySync() {
 	if (rafId) cancelAnimationFrame(rafId);
 
@@ -453,22 +511,13 @@ function startOverlaySync() {
 
 function updateOverlays() {
 	const currentTimeSec = video.currentTime || 0;
-	const currentTimeMs = currentTimeSec * 1000;
 
-	// Update screen banner
 	updateScreenBanner(currentTimeSec);
-
-	// Show click dots
 	updateClickDots(currentTimeSec);
-
-	// Highlight active events
 	updateActiveEvents(currentTimeSec);
-
-	// Update timeline position
 	updateTimeDisplay();
 	updateTimelinePosition();
 
-	// Frame info
 	document.getElementById('frameInfo').textContent =
 		`Time: ${currentTimeSec.toFixed(1)}s / ${(video.duration || 0).toFixed(1)}s`;
 }
@@ -490,19 +539,17 @@ function updateScreenBanner(timeSec) {
 }
 
 function updateClickDots(timeSec) {
-	// Remove old dots and trail SVG
 	document.querySelectorAll('.click-dot').forEach(d => d.remove());
 	document.querySelectorAll('.click-trail-svg').forEach(d => d.remove());
 
 	const wrap = document.getElementById('canvasWrap');
 
-	// Collect all clicks across all screens up to current time, sorted by time
-	const TRAIL_WINDOW = 3; // show clicks from last 3 seconds
+	const TRAIL_WINDOW = 3;
 	const allClicks = [];
 	for (const screen of screenTimeline) {
 		if (!screen.cor) continue;
 		for (const click of screen.cor) {
-			const ct = click[5]; // seconds
+			const ct = click[5];
 			if (ct <= timeSec && ct >= timeSec - TRAIL_WINDOW) {
 				allClicks.push({ x: click[0], y: click[1], time: ct });
 			}
@@ -512,7 +559,6 @@ function updateClickDots(timeSec) {
 
 	if (allClicks.length === 0) return;
 
-	// Get video display size and position relative to wrapper
 	const videoRect = video.getBoundingClientRect();
 	const wrapRect = wrap.getBoundingClientRect();
 	const offsetX = videoRect.left - wrapRect.left;
@@ -520,8 +566,6 @@ function updateClickDots(timeSec) {
 	const displayW = videoRect.width;
 	const displayH = videoRect.height;
 
-	// Click x,y are in CSS viewport pixels (clientX/clientY at record time).
-	// Video dimensions are in device pixels (scaled by DPR).
 	const dpr = dataJson?.device?.dpi || window.devicePixelRatio || 1;
 	const viewportW = (video.videoWidth || 1) / dpr;
 	const viewportH = (video.videoHeight || 1) / dpr;
@@ -533,7 +577,6 @@ function updateClickDots(timeSec) {
 		};
 	}
 
-	// Draw trail line connecting clicks
 	if (allClicks.length > 1) {
 		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 		svg.classList.add('click-trail-svg');
@@ -559,7 +602,6 @@ function updateClickDots(timeSec) {
 		}
 	}
 
-	// Draw dots
 	for (let i = 0; i < allClicks.length; i++) {
 		const click = allClicks[i];
 		const age = timeSec - click.time;
@@ -612,7 +654,6 @@ document.getElementById('timelineWrap').addEventListener('click', (e) => {
 	seekTo(pct * duration);
 });
 
-// Drag support for timeline thumb
 {
 	const wrap = document.getElementById('timelineWrap');
 	let dragging = false;
@@ -640,7 +681,6 @@ document.getElementById('playBtn').addEventListener('click', () => {
 	video.paused ? play() : pause();
 });
 
-// Sync play/pause button with video state
 video.addEventListener('play', () => {
 	document.getElementById('playBtn').innerHTML = '&#9646;&#9646;';
 });
@@ -660,7 +700,6 @@ document.querySelectorAll('.speed').forEach(el => {
 	});
 });
 
-// Keyboard
 document.addEventListener('keydown', (e) => {
 	if (e.target.tagName === 'INPUT') return;
 	switch (e.code) {
@@ -679,7 +718,129 @@ document.addEventListener('keydown', (e) => {
 	}
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Benchmark tab
+// ═══════════════════════════════════════════════════════════════════════════
+
+document.getElementById('benchListBtn').addEventListener('click', benchListSessions);
+
+async function benchListSessions() {
+	const select = document.getElementById('benchSessionSelect');
+	select.innerHTML = '<option value="">Loading...</option>';
+	document.getElementById('benchStatus').textContent = 'Listing sessions...';
+
+	try {
+		const canvasXml = await minioList('sessions/canvas/', '/', 'benchMinioUrl');
+		const prefixes = [...canvasXml.querySelectorAll('CommonPrefixes > Prefix')];
+		select.innerHTML = '';
+
+		if (prefixes.length === 0) {
+			select.innerHTML = '<option value="">No sessions found</option>';
+			document.getElementById('benchStatus').textContent = 'No sessions found';
+			return;
+		}
+
+		prefixes.forEach(p => {
+			const sid = p.textContent.replace('sessions/canvas/', '').replace(/\/$/, '');
+			const opt = document.createElement('option');
+			opt.value = sid;
+			opt.textContent = sid;
+			select.appendChild(opt);
+		});
+		select.selectedIndex = select.options.length - 1;
+		document.getElementById('benchRunBtn').disabled = false;
+		document.getElementById('benchStatus').textContent = `Found ${prefixes.length} session(s)`;
+	} catch (e) {
+		select.innerHTML = '<option value="">Error</option>';
+		document.getElementById('benchStatus').textContent = `Error: ${e.message}`;
+	}
+}
+
+document.getElementById('benchRunBtn').addEventListener('click', runBenchmark);
+
+async function runBenchmark() {
+	const sessionId = document.getElementById('benchSessionSelect').value;
+	if (!sessionId) return;
+
+	const minioUrl = document.getElementById('benchMinioUrl').value.replace(/\/+$/, '');
+	const loadingEl = document.getElementById('benchLoading');
+	const resultsEl = document.getElementById('benchResults');
+
+	loadingEl.classList.remove('hidden');
+	resultsEl.innerHTML = '';
+	document.getElementById('benchRunBtn').disabled = true;
+	document.getElementById('benchStatus').textContent = 'Running all strategies...';
+
+	try {
+		const resp = await fetch('/benchmark', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ sessionId, minioUrl }),
+		});
+		const data = await resp.json();
+
+		if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+		loadingEl.classList.add('hidden');
+		renderBenchmarkResults(data.results);
+		document.getElementById('benchStatus').textContent =
+			`Benchmark complete: ${data.results.length} strategies compared`;
+	} catch (e) {
+		loadingEl.classList.add('hidden');
+		document.getElementById('benchStatus').textContent = `Error: ${e.message}`;
+	} finally {
+		document.getElementById('benchRunBtn').disabled = false;
+	}
+}
+
+function renderBenchmarkResults(results) {
+	const container = document.getElementById('benchResults');
+
+	const sizes = results.filter(r => r.videoSizeBytes).map(r => r.videoSizeBytes);
+	const smallest = sizes.length > 0 ? Math.min(...sizes) : 0;
+
+	let html = `<table class="bench-table">
+		<thead><tr>
+			<th>Strategy</th>
+			<th>Encoding Time</th>
+			<th>Video Size</th>
+			<th>Source Frames</th>
+			<th>Video Frames</th>
+			<th>Preview</th>
+		</tr></thead><tbody>`;
+
+	for (const r of results) {
+		const isBest = r.videoSizeBytes && r.videoSizeBytes === smallest;
+		const rowClass = isBest ? ' class="best"' : '';
+
+		const sizeCell = r.videoSizeBytes
+			? `${formatFileSize(r.videoSizeBytes)}${isBest ? ' <span class="size-badge smallest">smallest</span>' : ''}`
+			: 'N/A';
+
+		const previewCell = r.videoUrl
+			? `<video src="${escapeHtml(r.videoUrl)}" preload="metadata" controls></video>`
+			: `<span class="bench-error">${escapeHtml(r.error || 'Failed')}</span>`;
+
+		html += `<tr${rowClass}>
+			<td>
+				<div class="strategy-name">${escapeHtml(r.name || r.strategy || '?')}</div>
+				<div class="strategy-desc">${escapeHtml(r.description || '')}</div>
+			</td>
+			<td>${r.encodingTimeMs != null ? (r.encodingTimeMs / 1000).toFixed(2) + 's' : 'N/A'}</td>
+			<td>${sizeCell}</td>
+			<td>${r.frameCount ?? 'N/A'}</td>
+			<td>${r.videoFrameCount ?? 'N/A'}</td>
+			<td class="bench-video-cell">${previewCell}</td>
+		</tr>`;
+	}
+
+	html += '</tbody></table>';
+	container.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
 function formatTime(sec) {
 	const m = Math.floor(sec / 60);
