@@ -30,27 +30,36 @@ export function extractFrames(batchBuffers) {
 	const batchDetails = []
 	let totalBatches = 0
 
+	let parseFailures = 0
 	for (const { name, buffer } of batchBuffers) {
-		const raw = decompressBuffer(buffer)
-		const batch = parseBatch(raw)
-		totalBatches++
+		try {
+			const raw = decompressBuffer(buffer)
+			const batch = parseBatch(raw)
+			totalBatches++
 
-		console.log(
-			`  Batch ${String(batch.batchIndex).padStart(4, '0')}: ${batch.frames.length} frames` +
-			` (${(raw.byteLength / 1024).toFixed(1)} KB raw)`
-		)
+			console.log(
+				`  Batch ${String(batch.batchIndex).padStart(4, '0')}: ${batch.frames.length} frames` +
+				` (${(raw.byteLength / 1024).toFixed(1)} KB raw)`
+			)
 
-		batchDetails.push(buildBatchInfo(name, batch, raw, buffer))
+			batchDetails.push(buildBatchInfo(name, batch, raw, buffer))
 
-		for (const frame of batch.frames) {
-			allFrames.push({
-				batchIndex: batch.batchIndex,
-				time: frame.time,
-				width: frame.width,
-				height: frame.height,
-				data: frame.data,
-			})
+			for (const frame of batch.frames) {
+				allFrames.push({
+					batchIndex: batch.batchIndex,
+					time: frame.time,
+					width: frame.width,
+					height: frame.height,
+					data: frame.data,
+				})
+			}
+		} catch (err) {
+			parseFailures++
+			console.warn(`  ⚠ Failed to parse batch "${name}": ${err.message} — skipping`)
 		}
+	}
+	if (parseFailures > 0) {
+		console.warn(`  ⚠ ${parseFailures}/${batchBuffers.length} batch(es) failed to parse`)
 	}
 
 	allFrames.sort((a, b) => a.time - b.time)

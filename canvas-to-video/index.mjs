@@ -141,9 +141,22 @@ async function main() {
 			console.log(`  Downloading ${objects.length} batch file(s)...`)
 
 			const batchBuffers = []
+			let downloadFailures = 0
 			for (const obj of objects) {
-				const buffer = await downloadObject(s3, obj.Key, { bucket: BUCKET })
-				batchBuffers.push({ name: basename(obj.Key), buffer })
+				try {
+					const buffer = await downloadObject(s3, obj.Key, { bucket: BUCKET })
+					batchBuffers.push({ name: basename(obj.Key), buffer })
+				} catch (err) {
+					downloadFailures++
+					console.warn(`  ⚠ Failed to download ${basename(obj.Key)}: ${err.message} — skipping batch`)
+				}
+			}
+			if (downloadFailures > 0) {
+				console.warn(`  ⚠ ${downloadFailures}/${objects.length} batch download(s) failed`)
+			}
+			if (batchBuffers.length === 0) {
+				console.log('  All batch downloads failed — skipping session')
+				continue
 			}
 
 			const opts = { outputDir: OUTPUT_DIR }
