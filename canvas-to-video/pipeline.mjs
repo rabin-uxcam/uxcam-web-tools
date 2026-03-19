@@ -21,6 +21,15 @@ export function ensureDir(dir, clean = false) {
 // ─── Batch parsing ──────────────────────────────────────────────────────────
 
 /**
+ * Parse batch index from filename like "batch-0001.bin".
+ * Returns the parsed integer or -1 if the name doesn't match.
+ */
+function parseBatchIndexFromName(name) {
+	const m = name.match(/batch-(\d+)\.bin$/i)
+	return m ? parseInt(m[1], 10) : -1
+}
+
+/**
  * Parse all batch buffers into a flat sorted array of frames.
  * @param {{ name: string, buffer: Buffer }[]} batchBuffers
  * @returns {{ allFrames: Object[], totalBatches: number, batchDetails: Object[] }}
@@ -37,16 +46,20 @@ export function extractFrames(batchBuffers) {
 			const batch = parseBatch(raw)
 			totalBatches++
 
+			// Prefer batch index from filename (V3/JSON formats always return 0)
+			const fileIndex = parseBatchIndexFromName(name)
+			const batchIndex = fileIndex >= 0 ? fileIndex : batch.batchIndex
+
 			console.log(
-				`  Batch ${String(batch.batchIndex).padStart(4, '0')}: ${batch.frames.length} frames` +
+				`  Batch ${String(batchIndex).padStart(4, '0')}: ${batch.frames.length} frames` +
 				` (${(raw.byteLength / 1024).toFixed(1)} KB raw)`
 			)
 
-			batchDetails.push(buildBatchInfo(name, batch, raw, buffer))
+			batchDetails.push(buildBatchInfo(name, { ...batch, batchIndex }, raw, buffer))
 
 			for (const frame of batch.frames) {
 				allFrames.push({
-					batchIndex: batch.batchIndex,
+					batchIndex,
 					time: frame.time,
 					width: frame.width,
 					height: frame.height,
@@ -187,26 +200,96 @@ export function runFfmpeg(args, outputVideo) {
 	}
 }
 
+// ─── Missing batch detection ────────────────────────────────────────────────
+
+/**
+ * Detect gaps in the batch file sequence and return frame-pair indices where
+ * a missing batch causes the gap. At those boundaries the real elapsed time
+ * is preserved (freeze last frame) instead of being clamped to maxGapMs.
+ *
+ * @param {{ name: string }[]} batchBuffers
+ * @param {Object[]} allFrames - sorted frames (each has batchIndex)
+ * @returns {Set<number>} frame indices i where frames[i]→frames[i+1] spans a missing batch
+ */
+export function detectBatchGaps(batchBuffers, allFrames) {
+	const batchPattern = /batch-(\d+)\.bin$/i
+	const presentIndices = []
+	for (const { name } of batchBuffers) {
+		const m = name.match(batchPattern)
+		if (m) presentIndices.push(parseInt(m[1], 10))
+	}
+
+	if (presentIndices.length < 2) return new Set()
+
+	presentIndices.sort((a, b) => a - b)
+
+	// Find which batch indices are missing in the sequence
+	const missingIndices = new Set()
+	for (let i = 0; i < presentIndices.length - 1; i++) {
+		for (let idx = presentIndices[i] + 1; idx < presentIndices[i + 1]; idx++) {
+			missingIndices.add(idx)
+		}
+	}
+
+	if (missingIndices.size === 0) return new Set()
+
+	// For each pair of consecutive present batches with a gap, mark the
+	// frame boundary where the transition happens in the sorted frame list
+	const gapFrameIndices = new Set()
+	for (let i = 0; i < presentIndices.length - 1; i++) {
+		const cur = presentIndices[i]
+		const next = presentIndices[i + 1]
+		if (next - cur <= 1) continue
+
+		for (let fi = 0; fi < allFrames.length - 1; fi++) {
+			if (allFrames[fi].batchIndex === cur && allFrames[fi + 1].batchIndex === next) {
+				gapFrameIndices.add(fi)
+			}
+		}
+	}
+
+	if (gapFrameIndices.size > 0) {
+		console.log(`  ⚠ Detected ${missingIndices.size} missing batch(es): [${[...missingIndices].join(', ')}]`)
+		console.log(`    Preserving real duration at ${gapFrameIndices.size} gap boundary(ies) (freeze-frame)`)
+	}
+
+	return gapFrameIndices
+}
+
 // ─── Time computation helpers ───────────────────────────────────────────────
 
 export function computeTimeSpan(allFrames) {
 	return allFrames.at(-1).time - allFrames[0].time
 }
 
-export function computeEffectiveTimeSpan(allFrames, maxGapMs = 10_000) {
+/**
+ * @param {Set<number>|null} missingBatchGaps - frame indices where real gap should be preserved
+ */
+export function computeEffectiveTimeSpan(allFrames, maxGapMs = 10_000, missingBatchGaps = null) {
 	let effective = 0
 	for (let i = 0; i < allFrames.length - 1; i++) {
 		const gap = allFrames[i + 1].time - allFrames[i].time
-		effective += Math.min(gap, maxGapMs)
+		if (missingBatchGaps && missingBatchGaps.has(i)) {
+			effective += gap // preserve real duration for missing batches
+		} else {
+			effective += Math.min(gap, maxGapMs)
+		}
 	}
 	return effective + 500 // hold last frame 500ms
 }
 
-export function buildEffectiveTimeline(allFrames, maxGapMs = 10_000) {
+/**
+ * @param {Set<number>|null} missingBatchGaps - frame indices where real gap should be preserved
+ */
+export function buildEffectiveTimeline(allFrames, maxGapMs = 10_000, missingBatchGaps = null) {
 	const times = [0]
 	for (let i = 1; i < allFrames.length; i++) {
 		const gap = allFrames[i].time - allFrames[i - 1].time
-		times.push(times[i - 1] + Math.min(gap, maxGapMs))
+		if (missingBatchGaps && missingBatchGaps.has(i - 1)) {
+			times.push(times[i - 1] + gap) // preserve real duration
+		} else {
+			times.push(times[i - 1] + Math.min(gap, maxGapMs))
+		}
 	}
 	return times
 }
