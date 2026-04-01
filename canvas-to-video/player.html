@@ -107,6 +107,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 <!-- Tab bar -->
 <div class="tab-bar">
 	<div class="tab active" data-tab="player">Player</div>
+	<div class="tab" data-tab="bin-processor">Bin Processor</div>
 	<div class="tab" data-tab="benchmark">Benchmark</div>
 </div>
 
@@ -187,6 +188,58 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 
 </div><!-- /panel-benchmark -->
 
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Bin Processor tab -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-bin-processor">
+
+<div class="header">
+	<label>MinIO:</label>
+	<input type="text" id="binMinioUrl" value="http://localhost:9000" placeholder="MinIO endpoint">
+	<button id="binListBtn">List</button>
+	<label>Session:</label>
+	<select id="binSessionSelect"><option value="">-- click List --</option></select>
+	<label>data.json:</label>
+	<select id="binDataSelect"><option value="">-- click List --</option></select>
+	<button id="binLoadBtn" disabled>Convert &amp; Play</button>
+	<span class="status" id="binStatus"></span>
+</div>
+
+<div class="main">
+	<div class="canvas-wrap" id="binCanvasWrap">
+		<video id="binVideo" preload="auto" playsinline></video>
+		<div class="screen-banner" id="binBanner">No session loaded</div>
+		<div class="loading hidden" id="binLoading">
+			<div class="spinner"></div>
+			<div class="progress-text" id="binLoadingText">Converting...</div>
+		</div>
+	</div>
+	<div class="sidebar">
+		<div class="sidebar-title">Events</div>
+		<div class="event-log" id="binEventLog"></div>
+	</div>
+</div>
+
+<div class="controls">
+	<div class="controls-row">
+		<button id="binPlayBtn" title="Space">&#9654;</button>
+		<span class="time-display" id="binTimeDisplay">0:00.0 / 0:00.0</span>
+		<span class="speed bin-speed" data-speed="0.5">0.5x</span>
+		<span class="speed bin-speed active" data-speed="1">1x</span>
+		<span class="speed bin-speed" data-speed="2">2x</span>
+		<span class="speed bin-speed" data-speed="4">4x</span>
+		<span style="flex:1"></span>
+		<span id="binFrameInfo" style="font-size:12px;color:#888;"></span>
+	</div>
+	<div class="timeline-wrap" id="binTimelineWrap">
+		<div class="timeline-bar"></div>
+		<div class="timeline-progress" id="binTimelineProgress"></div>
+		<div class="timeline-thumb" id="binTimelineThumb"></div>
+	</div>
+</div>
+
+</div><!-- /panel-bin-processor -->
+
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
 // Tab switching
@@ -209,6 +262,7 @@ let dataJson = null;
 let screenTimeline = [];	// st[]
 let events = [];		// evt[]
 let totalTimeMs = 0;
+let firstFrameOffsetSec = 0;	// session time of first canvas frame
 let playbackSpeed = 1;
 let rafId = null;
 
@@ -239,8 +293,8 @@ async function minioList(prefix, delimiter, urlInputId) {
 	return parser.parseFromString(text, 'application/xml');
 }
 
-async function minioGet(key) {
-	const resp = await fetch(`${minioBase()}/${MINIO_BUCKET}/${key}`);
+async function minioGet(key, urlInputId) {
+	const resp = await fetch(`${minioBase(urlInputId)}/${MINIO_BUCKET}/${key}`);
 	if (!resp.ok) throw new Error(`Failed to fetch ${key}: ${resp.status}`);
 	return resp;
 }
@@ -331,7 +385,8 @@ async function loadSession() {
 			throw new Error(err.error || `Conversion failed: ${convertResp.status}`);
 		}
 
-		const { videoUrl, frameCount, videoFrameCount, videoSizeBytes } = await convertResp.json();
+		const { videoUrl, frameCount, videoFrameCount, videoSizeBytes, manifest } = await convertResp.json();
+		firstFrameOffsetSec = (manifest?.frames?.[0]?.time || 0) / 1000;
 
 		showLoading('Loading video...');
 		await new Promise((resolve, reject) => {
@@ -442,10 +497,13 @@ function buildTimeline() {
 	const wrap = document.getElementById('timelineWrap');
 	wrap.querySelectorAll('.timeline-marker').forEach(m => m.remove());
 
-	if (totalTimeMs <= 0) return;
+	const duration = video.duration || 0;
+	if (duration <= 0) return;
 
 	events.forEach(evt => {
-		const pct = (evt.time * 1000 / totalTimeMs) * 100;
+		const videoTime = sessionToVideo(evt.time);
+		if (videoTime < 0 || videoTime > duration) return;
+		const pct = (videoTime / duration) * 100;
 		const m = document.createElement('div');
 		m.className = 'timeline-marker';
 		m.style.left = `${pct}%`;
@@ -454,7 +512,9 @@ function buildTimeline() {
 	});
 
 	screenTimeline.forEach(s => {
-		const pct = (s.at * 1000 / totalTimeMs) * 100;
+		const videoTime = sessionToVideo(s.at);
+		if (videoTime < 0 || videoTime > duration) return;
+		const pct = (videoTime / duration) * 100;
 		const m = document.createElement('div');
 		m.className = 'timeline-marker screen-marker';
 		m.style.left = `${pct}%`;
@@ -477,7 +537,7 @@ function buildEventLog() {
 			<span class="name ${evt.internal ? 'internal' : ''}">${escapeHtml(evt.name)}</span>
 			<span class="screen">${escapeHtml(evt.screen || '')}</span>
 		`;
-		div.addEventListener('click', () => seekTo(evt.time));
+		div.addEventListener('click', () => seekTo(sessionToVideo(evt.time)));
 		log.appendChild(div);
 	});
 }
@@ -494,8 +554,16 @@ function pause() {
 	document.getElementById('playBtn').innerHTML = '&#9654;';
 }
 
-function seekTo(timeSec) {
-	video.currentTime = Math.max(0, Math.min(timeSec, video.duration || 0));
+function sessionToVideo(sessionTimeSec) {
+	return sessionTimeSec - firstFrameOffsetSec;
+}
+
+function videoToSession(videoTimeSec) {
+	return videoTimeSec + firstFrameOffsetSec;
+}
+
+function seekTo(videoTimeSec) {
+	video.currentTime = Math.max(0, Math.min(videoTimeSec, video.duration || 0));
 	updateOverlays();
 }
 
@@ -510,16 +578,16 @@ function startOverlaySync() {
 }
 
 function updateOverlays() {
-	const currentTimeSec = video.currentTime || 0;
+	const sessionTimeSec = videoToSession(video.currentTime || 0);
 
-	updateScreenBanner(currentTimeSec);
-	updateClickDots(currentTimeSec);
-	updateActiveEvents(currentTimeSec);
+	updateScreenBanner(sessionTimeSec);
+	updateClickDots(sessionTimeSec);
+	updateActiveEvents(sessionTimeSec);
 	updateTimeDisplay();
 	updateTimelinePosition();
 
 	document.getElementById('frameInfo').textContent =
-		`Time: ${currentTimeSec.toFixed(1)}s / ${(video.duration || 0).toFixed(1)}s`;
+		`Time: ${(video.currentTime || 0).toFixed(1)}s / ${(video.duration || 0).toFixed(1)}s`;
 }
 
 // ─── Overlays ────────────────────────────────────────────────────────────────
@@ -878,6 +946,481 @@ function escapeHtml(str) {
 	const d = document.createElement('div');
 	d.textContent = str;
 	return d.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bin Processor tab
+// ═══════════════════════════════════════════════════════════════════════════
+
+const binVideo = document.getElementById('binVideo');
+let binDataJson = null;
+let binScreenTimeline = [];
+let binEvents = [];
+let binTotalTimeMs = 0;
+let binFirstFrameOffsetSec = 0;
+let binPlaybackSpeed = 1;
+let binRafId = null;
+
+// ─── List sessions + data files ──────────────────────────────────────────────
+
+document.getElementById('binListBtn').addEventListener('click', binListAll);
+
+async function binListAll() {
+	const sessionSelect = document.getElementById('binSessionSelect');
+	const dataSelect = document.getElementById('binDataSelect');
+	sessionSelect.innerHTML = '<option value="">Loading...</option>';
+	dataSelect.innerHTML = '<option value="">Loading...</option>';
+	document.getElementById('binStatus').textContent = 'Listing MinIO contents...';
+
+	try {
+		const canvasXml = await minioList('sessions/canvas/', '/', 'binMinioUrl');
+		const prefixes = [...canvasXml.querySelectorAll('CommonPrefixes > Prefix')];
+		sessionSelect.innerHTML = '';
+
+		if (prefixes.length === 0) {
+			sessionSelect.innerHTML = '<option value="">No sessions found</option>';
+		} else {
+			prefixes.forEach(p => {
+				const sid = p.textContent.replace('sessions/canvas/', '').replace(/\/$/, '');
+				const opt = document.createElement('option');
+				opt.value = sid;
+				opt.textContent = sid;
+				sessionSelect.appendChild(opt);
+			});
+			sessionSelect.selectedIndex = sessionSelect.options.length - 1;
+		}
+
+		const dataXml = await minioList('sessions/data/', null, 'binMinioUrl');
+		const allKeys = [...dataXml.querySelectorAll('Contents > Key')].map(k => k.textContent);
+		const dataFiles = allKeys.filter(k => k.endsWith('.json') || k.endsWith('.json.gz'));
+		dataSelect.innerHTML = '';
+
+		if (dataFiles.length === 0) {
+			dataSelect.innerHTML = '<option value="">No data files found</option>';
+		} else {
+			const noneOpt = document.createElement('option');
+			noneOpt.value = '';
+			noneOpt.textContent = '(none - auto-detect)';
+			dataSelect.appendChild(noneOpt);
+
+			dataFiles.forEach(key => {
+				const opt = document.createElement('option');
+				opt.value = key;
+				opt.textContent = key;
+				dataSelect.appendChild(opt);
+			});
+			dataSelect.selectedIndex = dataSelect.options.length - 1;
+		}
+
+		document.getElementById('binLoadBtn').disabled = false;
+		document.getElementById('binStatus').textContent = `Found ${prefixes.length} session(s), ${dataFiles.length} data file(s)`;
+	} catch (e) {
+		sessionSelect.innerHTML = '<option value="">Error</option>';
+		dataSelect.innerHTML = '<option value="">Error</option>';
+		document.getElementById('binStatus').textContent = `Error: ${e.message}`;
+	}
+}
+
+// ─── Convert & Play ──────────────────────────────────────────────────────────
+
+document.getElementById('binLoadBtn').addEventListener('click', binLoadSession);
+
+async function binLoadSession() {
+	const sessionId = document.getElementById('binSessionSelect').value;
+	if (!sessionId) return;
+
+	const minioUrl = document.getElementById('binMinioUrl').value.replace(/\/+$/, '');
+	const loadingEl = document.getElementById('binLoading');
+
+	loadingEl.classList.remove('hidden');
+	document.getElementById('binLoadingText').textContent = 'Converting with bin-processor (libx265 VFR)...';
+	document.getElementById('binLoadBtn').disabled = true;
+	binDataJson = null;
+
+	try {
+		// 1) Convert
+		const resp = await fetch('/convert-bin', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ sessionId, minioUrl }),
+		});
+		const data = await resp.json();
+		if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+		binFirstFrameOffsetSec = 0;
+
+		// 2) Load video
+		document.getElementById('binLoadingText').textContent = 'Loading video...';
+		await new Promise((resolve, reject) => {
+			binVideo.oncanplay = () => { binVideo.oncanplay = null; resolve(); };
+			binVideo.onerror = () => reject(new Error('Failed to load video'));
+			binVideo.src = data.videoUrl;
+			binVideo.load();
+		});
+
+		// 3) Load data.json
+		document.getElementById('binLoadingText').textContent = 'Loading data.json...';
+		const dataKey = document.getElementById('binDataSelect').value;
+
+		if (dataKey) {
+			binDataJson = await binFetchDataJson(dataKey);
+		} else {
+			binDataJson = await binFindDataJson(sessionId);
+		}
+
+		if (binDataJson) {
+			binScreenTimeline = binDataJson.st || [];
+			binEvents = binDataJson.evt || [];
+			binTotalTimeMs = (binDataJson.session?.tt || 0) * 1000;
+			const sizeStr = data.videoSizeBytes ? ` | ${formatFileSize(data.videoSizeBytes)}` : '';
+			document.getElementById('binStatus').textContent =
+				`${data.frameCount} frames, ${binScreenTimeline.length} screens, ${binEvents.length} events${sizeStr} (${(data.encodingTimeMs / 1000).toFixed(2)}s encode)`;
+		} else {
+			binScreenTimeline = [];
+			binEvents = [];
+			binTotalTimeMs = (binVideo.duration || 0) * 1000;
+			document.getElementById('binStatus').textContent =
+				`${data.frameCount} frames, ${formatFileSize(data.videoSizeBytes)} (${(data.encodingTimeMs / 1000).toFixed(2)}s encode), no data.json`;
+		}
+
+		if (binTotalTimeMs <= 0) binTotalTimeMs = (binVideo.duration || 0) * 1000;
+
+		binSetupPlayer();
+		loadingEl.classList.add('hidden');
+	} catch (e) {
+		loadingEl.classList.add('hidden');
+		document.getElementById('binStatus').textContent = `Error: ${e.message}`;
+		console.error(e);
+	} finally {
+		document.getElementById('binLoadBtn').disabled = false;
+	}
+}
+
+// ─── data.json loading ───────────────────────────────────────────────────────
+
+async function binFetchDataJson(key) {
+	const resp = await minioGet(key, 'binMinioUrl');
+	const rawBuf = await resp.arrayBuffer();
+	try {
+		const ds = new DecompressionStream('gzip');
+		const reader = new Blob([rawBuf]).stream().pipeThrough(ds).getReader();
+		const chunks = [];
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			chunks.push(value);
+		}
+		const text = new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
+		return JSON.parse(text);
+	} catch {
+		const text = new TextDecoder().decode(rawBuf);
+		return JSON.parse(text);
+	}
+}
+
+async function binFindDataJson(sessionId) {
+	try {
+		const xml = await minioList('', null, 'binMinioUrl');
+		const allKeys = [...xml.querySelectorAll('Contents > Key')]
+			.map(k => k.textContent)
+			.filter(k => k.endsWith('data.json'));
+
+		for (const key of allKeys) {
+			if (key.includes(sessionId)) {
+				return await binFetchDataJson(key);
+			}
+		}
+
+		for (const key of allKeys) {
+			try {
+				const dj = await binFetchDataJson(key);
+				if (dj.session?.id === sessionId) return dj;
+			} catch { /* skip */ }
+		}
+	} catch { /* skip */ }
+	return null;
+}
+
+// ─── Player setup ────────────────────────────────────────────────────────────
+
+function binSetupPlayer() {
+	binVideo.currentTime = 0;
+	binVideo.pause();
+	binVideo.playbackRate = binPlaybackSpeed;
+	document.getElementById('binPlayBtn').innerHTML = '&#9654;';
+
+	binBuildTimeline();
+	binBuildEventLog();
+	binUpdateOverlays();
+	binStartOverlaySync();
+}
+
+function binSessionToVideo(sessionTimeSec) {
+	return sessionTimeSec - binFirstFrameOffsetSec;
+}
+
+function binVideoToSession(videoTimeSec) {
+	return videoTimeSec + binFirstFrameOffsetSec;
+}
+
+function binSeekTo(videoTimeSec) {
+	binVideo.currentTime = Math.max(0, Math.min(videoTimeSec, binVideo.duration || 0));
+	binUpdateOverlays();
+}
+
+// ─── Timeline markers ────────────────────────────────────────────────────────
+
+function binBuildTimeline() {
+	const wrap = document.getElementById('binTimelineWrap');
+	wrap.querySelectorAll('.timeline-marker').forEach(m => m.remove());
+
+	const duration = binVideo.duration || 0;
+	if (duration <= 0) return;
+
+	binEvents.forEach(evt => {
+		const videoTime = binSessionToVideo(evt.time);
+		if (videoTime < 0 || videoTime > duration) return;
+		const pct = (videoTime / duration) * 100;
+		const m = document.createElement('div');
+		m.className = 'timeline-marker';
+		m.style.left = `${pct}%`;
+		m.setAttribute('data-label', `${evt.name} @${evt.time.toFixed(1)}s`);
+		wrap.appendChild(m);
+	});
+
+	binScreenTimeline.forEach(s => {
+		const videoTime = binSessionToVideo(s.at);
+		if (videoTime < 0 || videoTime > duration) return;
+		const pct = (videoTime / duration) * 100;
+		const m = document.createElement('div');
+		m.className = 'timeline-marker screen-marker';
+		m.style.left = `${pct}%`;
+		m.setAttribute('data-label', s.an);
+		wrap.appendChild(m);
+	});
+}
+
+// ─── Event log sidebar ───────────────────────────────────────────────────────
+
+function binBuildEventLog() {
+	const log = document.getElementById('binEventLog');
+	log.innerHTML = '';
+
+	const allEvts = binEvents.slice().sort((a, b) => a.time - b.time);
+	allEvts.forEach((evt, i) => {
+		const div = document.createElement('div');
+		div.className = 'event-item';
+		div.id = `bin-evt-${i}`;
+		div.innerHTML = `
+			<span class="time">${formatTime(evt.time)}</span>
+			<span class="name ${evt.internal ? 'internal' : ''}">${escapeHtml(evt.name)}</span>
+			<span class="screen">${escapeHtml(evt.screen || '')}</span>
+		`;
+		div.addEventListener('click', () => binSeekTo(binSessionToVideo(evt.time)));
+		log.appendChild(div);
+	});
+}
+
+// ─── Overlay sync (RAF loop) ─────────────────────────────────────────────────
+
+function binStartOverlaySync() {
+	if (binRafId) cancelAnimationFrame(binRafId);
+	function tick() {
+		binUpdateOverlays();
+		binRafId = requestAnimationFrame(tick);
+	}
+	binRafId = requestAnimationFrame(tick);
+}
+
+function binUpdateOverlays() {
+	const sessionTimeSec = binVideoToSession(binVideo.currentTime || 0);
+
+	binUpdateScreenBanner(sessionTimeSec);
+	binUpdateClickDots(sessionTimeSec);
+	binUpdateActiveEvents(sessionTimeSec);
+	binUpdateTimeDisplay();
+	binUpdateTimelinePosition();
+
+	document.getElementById('binFrameInfo').textContent =
+		`Time: ${(binVideo.currentTime || 0).toFixed(1)}s / ${(binVideo.duration || 0).toFixed(1)}s`;
+}
+
+// ─── Screen banner ───────────────────────────────────────────────────────────
+
+function binUpdateScreenBanner(timeSec) {
+	const banner = document.getElementById('binBanner');
+	let current = null;
+	for (let i = binScreenTimeline.length - 1; i >= 0; i--) {
+		if (binScreenTimeline[i].at <= timeSec) {
+			current = binScreenTimeline[i];
+			break;
+		}
+	}
+	banner.textContent = current ? current.an : 'No screen';
+}
+
+// ─── Click dots + trails ─────────────────────────────────────────────────────
+
+function binUpdateClickDots(timeSec) {
+	document.querySelectorAll('#binCanvasWrap .click-dot').forEach(d => d.remove());
+	document.querySelectorAll('#binCanvasWrap .click-trail-svg').forEach(d => d.remove());
+
+	const wrap = document.getElementById('binCanvasWrap');
+	const TRAIL_WINDOW = 3;
+	const allClicks = [];
+
+	for (const screen of binScreenTimeline) {
+		if (!screen.cor) continue;
+		for (const click of screen.cor) {
+			const ct = click[5];
+			if (ct <= timeSec && ct >= timeSec - TRAIL_WINDOW) {
+				allClicks.push({ x: click[0], y: click[1], time: ct });
+			}
+		}
+	}
+	allClicks.sort((a, b) => a.time - b.time);
+	if (allClicks.length === 0) return;
+
+	const videoRect = binVideo.getBoundingClientRect();
+	const wrapRect = wrap.getBoundingClientRect();
+	const offsetX = videoRect.left - wrapRect.left;
+	const offsetY = videoRect.top - wrapRect.top;
+	const displayW = videoRect.width;
+	const displayH = videoRect.height;
+
+	const dpr = binDataJson?.device?.dpi || window.devicePixelRatio || 1;
+	const viewportW = (binVideo.videoWidth || 1) / dpr;
+	const viewportH = (binVideo.videoHeight || 1) / dpr;
+
+	function toScreen(cx, cy) {
+		return {
+			x: offsetX + (cx / viewportW) * displayW,
+			y: offsetY + (cy / viewportH) * displayH,
+		};
+	}
+
+	if (allClicks.length > 1) {
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.classList.add('click-trail-svg');
+		svg.setAttribute('width', '100%');
+		svg.setAttribute('height', '100%');
+		wrap.appendChild(svg);
+
+		for (let i = 1; i < allClicks.length; i++) {
+			const prev = toScreen(allClicks[i - 1].x, allClicks[i - 1].y);
+			const curr = toScreen(allClicks[i].x, allClicks[i].y);
+			const age = (timeSec - allClicks[i].time) / TRAIL_WINDOW;
+			const opacity = Math.max(0.1, 1 - age);
+
+			const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+			line.setAttribute('x1', prev.x);
+			line.setAttribute('y1', prev.y);
+			line.setAttribute('x2', curr.x);
+			line.setAttribute('y2', curr.y);
+			line.setAttribute('stroke', `rgba(255, 150, 80, ${opacity * 0.6})`);
+			line.setAttribute('stroke-width', '2');
+			line.setAttribute('stroke-dasharray', '4 3');
+			svg.appendChild(line);
+		}
+	}
+
+	for (let i = 0; i < allClicks.length; i++) {
+		const click = allClicks[i];
+		const age = timeSec - click.time;
+		const isCurrent = age < 0.3;
+		const pos = toScreen(click.x, click.y);
+
+		const dot = document.createElement('div');
+		dot.className = `click-dot ${isCurrent ? 'current' : 'trail'}`;
+		if (!isCurrent) dot.style.opacity = Math.max(0.15, 1 - (age / TRAIL_WINDOW));
+		dot.style.left = `${pos.x}px`;
+		dot.style.top = `${pos.y}px`;
+		wrap.appendChild(dot);
+	}
+}
+
+// ─── Active event highlight ──────────────────────────────────────────────────
+
+function binUpdateActiveEvents(timeSec) {
+	const sorted = binEvents.slice().sort((a, b) => a.time - b.time);
+	sorted.forEach((evt, i) => {
+		const el = document.getElementById(`bin-evt-${i}`);
+		if (!el) return;
+		const diff = Math.abs(timeSec - evt.time);
+		if (diff < 0.2) {
+			el.classList.add('active');
+			el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		} else {
+			el.classList.remove('active');
+		}
+	});
+}
+
+// ─── Time display + timeline position ────────────────────────────────────────
+
+function binUpdateTimeDisplay() {
+	const cur = binVideo.currentTime || 0;
+	const dur = binVideo.duration || 0;
+	document.getElementById('binTimeDisplay').textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
+}
+
+function binUpdateTimelinePosition() {
+	const duration = binVideo.duration || 0;
+	if (duration <= 0) return;
+	const pct = ((binVideo.currentTime || 0) / duration) * 100;
+	document.getElementById('binTimelineProgress').style.width = `${pct}%`;
+	document.getElementById('binTimelineThumb').style.left = `${pct}%`;
+}
+
+// ─── Playback controls ──────────────────────────────────────────────────────
+
+document.getElementById('binPlayBtn').addEventListener('click', () => {
+	binVideo.paused ? binVideo.play() : binVideo.pause();
+});
+
+binVideo.addEventListener('play', () => {
+	document.getElementById('binPlayBtn').innerHTML = '&#9646;&#9646;';
+});
+binVideo.addEventListener('pause', () => {
+	document.getElementById('binPlayBtn').innerHTML = '&#9654;';
+});
+binVideo.addEventListener('ended', () => {
+	document.getElementById('binPlayBtn').innerHTML = '&#9654;';
+});
+
+document.querySelectorAll('.bin-speed').forEach(el => {
+	el.addEventListener('click', () => {
+		document.querySelectorAll('.bin-speed').forEach(s => s.classList.remove('active'));
+		el.classList.add('active');
+		binPlaybackSpeed = parseFloat(el.dataset.speed);
+		binVideo.playbackRate = binPlaybackSpeed;
+	});
+});
+
+document.getElementById('binTimelineWrap').addEventListener('click', (e) => {
+	const dur = binVideo.duration || 0;
+	if (dur <= 0) return;
+	const rect = e.currentTarget.getBoundingClientRect();
+	const pct = (e.clientX - rect.left) / rect.width;
+	binSeekTo(pct * dur);
+});
+
+{
+	const wrap = document.getElementById('binTimelineWrap');
+	let dragging = false;
+	wrap.addEventListener('mousedown', (e) => {
+		dragging = true;
+		const rect = wrap.getBoundingClientRect();
+		const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		binSeekTo(pct * (binVideo.duration || 0));
+	});
+	document.addEventListener('mousemove', (e) => {
+		if (!dragging) return;
+		const rect = wrap.getBoundingClientRect();
+		const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		binSeekTo(pct * (binVideo.duration || 0));
+	});
+	document.addEventListener('mouseup', () => { dragging = false; });
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

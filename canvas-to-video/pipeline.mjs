@@ -262,34 +262,14 @@ export function computeTimeSpan(allFrames) {
 	return allFrames.at(-1).time - allFrames[0].time
 }
 
-/**
- * @param {Set<number>|null} missingBatchGaps - frame indices where real gap should be preserved
- */
-export function computeEffectiveTimeSpan(allFrames, maxGapMs = 10_000, missingBatchGaps = null) {
-	let effective = 0
-	for (let i = 0; i < allFrames.length - 1; i++) {
-		const gap = allFrames[i + 1].time - allFrames[i].time
-		if (missingBatchGaps && missingBatchGaps.has(i)) {
-			effective += gap // preserve real duration for missing batches
-		} else {
-			effective += Math.min(gap, maxGapMs)
-		}
-	}
-	return effective + 500 // hold last frame 500ms
+export function computeEffectiveTimeSpan(allFrames) {
+	return computeTimeSpan(allFrames) + 500 // hold last frame 500ms
 }
 
-/**
- * @param {Set<number>|null} missingBatchGaps - frame indices where real gap should be preserved
- */
-export function buildEffectiveTimeline(allFrames, maxGapMs = 10_000, missingBatchGaps = null) {
+export function buildEffectiveTimeline(allFrames) {
 	const times = [0]
 	for (let i = 1; i < allFrames.length; i++) {
-		const gap = allFrames[i].time - allFrames[i - 1].time
-		if (missingBatchGaps && missingBatchGaps.has(i - 1)) {
-			times.push(times[i - 1] + gap) // preserve real duration
-		} else {
-			times.push(times[i - 1] + Math.min(gap, maxGapMs))
-		}
+		times.push(allFrames[i].time - allFrames[0].time)
 	}
 	return times
 }

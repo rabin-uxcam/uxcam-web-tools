@@ -26,6 +26,7 @@ import {
 	getStrategy,
 	getAllStrategies,
 } from './index.mjs'
+import { processBin } from './bin-processor.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const PORT = parseInt(process.env.PORT || '5505', 10)
@@ -243,6 +244,56 @@ async function handleBenchmark(req, res) {
 	}
 }
 
+// ─── POST /convert-bin — bin-processor.ts conversion logic ───────────────────
+
+async function handleConvertBin(req, res) {
+	let body = ''
+	for await (const chunk of req) body += chunk
+
+	let params
+	try {
+		params = JSON.parse(body)
+	} catch {
+		return sendJson(res, 400, { error: 'Invalid JSON body' })
+	}
+
+	const { sessionId } = params
+	if (!sessionId) {
+		return sendJson(res, 400, { error: 'sessionId is required' })
+	}
+
+	console.log(`[convert-bin] Session: ${sessionId}`)
+
+	try {
+		const batchBuffers = await downloadBatchFiles(params)
+		if (!batchBuffers) {
+			return sendJson(res, 404, { error: 'No batch files found for this session' })
+		}
+
+		const startMs = Date.now()
+		const result = await processBin(batchBuffers, sessionId, OUTPUT_DIR)
+		const encodingTimeMs = Date.now() - startMs
+
+		if (!result) {
+			return sendJson(res, 500, { error: 'No frames found or conversion failed' })
+		}
+
+		const videoUrl = `/output/${sessionId}-bin/${sessionId}.mp4`
+		console.log(`[convert-bin] Done → ${videoUrl} (${encodingTimeMs}ms)`)
+
+		sendJson(res, 200, {
+			videoUrl,
+			encodingTimeMs,
+			frameCount: result.frameCount,
+			videoSizeBytes: result.videoSizeBytes,
+			dimensions: result.dimensions,
+		})
+	} catch (err) {
+		console.error('[convert-bin] Error:', err)
+		sendJson(res, 500, { error: err.message })
+	}
+}
+
 // ─── GET /minio/* — proxy to MinIO ─────────────────────────────────────────
 
 async function handleMinioProxy(req, res) {
@@ -308,6 +359,11 @@ const server = createServer(async (req, res) => {
 			return await handleBenchmark(req, res)
 		}
 
+		// POST /convert-bin — bin-processor.ts logic
+		if (req.method === 'POST' && url.pathname === '/convert-bin') {
+			return await handleConvertBin(req, res)
+		}
+
 		// GET /minio/* — proxy to MinIO
 		if (url.pathname.startsWith('/minio/')) {
 			return await handleMinioProxy(req, res)
@@ -368,6 +424,7 @@ server.listen(PORT, () => {
 	console.log(`  Strategies: GET  http://localhost:${PORT}/strategies`)
 	console.log(`  Convert:    POST http://localhost:${PORT}/convert`)
 	console.log(`  Benchmark:  POST http://localhost:${PORT}/benchmark`)
+	console.log(`  Bin-proc:   POST http://localhost:${PORT}/convert-bin`)
 	console.log(`  MinIO proxy: http://localhost:${PORT}/minio/<host>/<path>`)
 	console.log()
 })

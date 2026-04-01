@@ -12,7 +12,6 @@ import {
 	ensureDir, extractFrames, resolveCanvasSize,
 	writeSourceFrames, runFfmpeg,
 	computeTimeSpan, computeEffectiveTimeSpan, buildEffectiveTimeline,
-	detectBatchGaps,
 } from './pipeline.mjs'
 
 const DEFAULT_FPS = 3
@@ -30,10 +29,9 @@ async function convert(batchBuffers, sessionName, opts = {}) {
 
 	const { maxW, maxH, hasVaryingSizes } = await resolveCanvasSize(allFrames)
 
-	const missingBatchGaps = detectBatchGaps(batchBuffers, allFrames)
 	const fps = opts.fps || DEFAULT_FPS
 	const timeSpanMs = computeTimeSpan(allFrames)
-	const effectiveTimeSpanMs = computeEffectiveTimeSpan(allFrames, 10_000, missingBatchGaps)
+	const effectiveTimeSpanMs = computeEffectiveTimeSpan(allFrames)
 	const frameDurationMs = 1000 / fps
 	const totalVideoFrames = Math.ceil(effectiveTimeSpanMs / frameDurationMs) + 1
 
@@ -45,7 +43,7 @@ async function convert(batchBuffers, sessionName, opts = {}) {
 
 	const sourceFramePaths = await writeSourceFrames(allFrames, framesDir, maxW, maxH, hasVaryingSizes)
 
-	const sourceEffectiveTimes = buildEffectiveTimeline(allFrames, 10_000, missingBatchGaps)
+	const sourceEffectiveTimes = buildEffectiveTimeline(allFrames)
 	const videoFrameCount = mapVideoFrames(
 		allFrames, sourceFramePaths, sourceEffectiveTimes, framesDir, frameDurationMs, totalVideoFrames
 	)
@@ -113,7 +111,7 @@ function buildManifest(sessionName, totalBatches, allFrames, timeSpanMs, effecti
 		batches: batchDetails,
 		frames: allFrames.map((f, i) => {
 			const durationMs = (i + 1 < allFrames.length)
-				? Math.min(allFrames[i + 1].time - f.time, 10_000)
+				? allFrames[i + 1].time - f.time
 				: 500
 			return {
 				index: i,
