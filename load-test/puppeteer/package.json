@@ -1,0 +1,17 @@
+{
+  "name": "websdk-puppeteer-load-test",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "npx tsx main.ts",
+    "test:headed": "npx tsx main.ts --headed",
+    "test:bot-detection": "npx tsx bot-detection.ts"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}

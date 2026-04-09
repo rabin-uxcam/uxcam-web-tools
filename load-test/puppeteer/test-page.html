@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UXCam SDK Load Test</title>
+  <style>
+    body { font-family: sans-serif; padding: 40px; }
+    button { padding: 10px 20px; margin: 10px; cursor: pointer; }
+    input { padding: 10px; margin: 10px; width: 300px; }
+    .section { margin: 20px 0; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>UXCam SDK Load Test Page</h1>
+
+  <div class="section">
+    <h2>Form Interactions</h2>
+    <input type="text" id="name-input" placeholder="Enter your name" />
+    <input type="email" id="email-input" placeholder="Enter your email" />
+    <button id="submit-btn">Submit</button>
+  </div>
+
+  <div class="section">
+    <h2>Click Targets</h2>
+    <button id="btn-1">Button 1</button>
+    <button id="btn-2">Button 2</button>
+    <button id="btn-3">Button 3</button>
+  </div>
+
+  <div class="section" id="dynamic-content">
+    <h2>Dynamic Content</h2>
+    <p>This area will be updated dynamically.</p>
+  </div>
+
+  <script>
+    // Dynamic DOM mutations to generate SDK events
+    let counter = 0
+    document.getElementById('submit-btn').addEventListener('click', () => {
+      const div = document.getElementById('dynamic-content')
+      const el = document.createElement('p')
+      el.textContent = `Submission #${++counter} at ${new Date().toISOString()}`
+      div.appendChild(el)
+    })
+
+    document.querySelectorAll('[id^="btn-"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        btn.textContent = `Clicked! (${new Date().toLocaleTimeString()})`
+        btn.style.backgroundColor = '#' + Math.floor(Math.random() * 16777215).toString(16)
+      })
+    })
+  </script>
+
+  <!-- SDK init snippet — APP_KEY is injected by the test harness -->
+  <script id="uxcam-init"></script>
+</body>
+</html>
