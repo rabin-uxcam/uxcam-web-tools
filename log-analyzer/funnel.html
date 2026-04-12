@@ -205,7 +205,7 @@
     <div class="details-section">
       <h2>Session Details</h2>
       <div class="tabs" id="tabs"></div>
-      <input type="text" class="search-box" placeholder="Search by session ID..." oninput="filterTable(this.value)">
+      <input type="text" class="search-box" placeholder="Search by session ID or actual session ID..." oninput="filterTable(this.value)">
       <div id="tableContainer"></div>
       <div class="pagination" id="pagination"></div>
     </div>
@@ -358,6 +358,7 @@ function updateAnalyzeBtn() {
 
 function parseVerification(entries) {
   // "Verification took 85ms for 4e6e24e2-f450-b459-56ee-8ad654cba98e appKey: ng8stbb0rvb94nb-eu"
+  // May also contain sessionId: {actualId}
   const map = new Map();
   const seen = new Map(); // sid -> count
   for (const entry of entries) {
@@ -365,9 +366,10 @@ function parseVerification(entries) {
     const match = body.match(/Verification took (\d+)ms for ([0-9a-f-]{36})/i);
     if (match) {
       const sid = match[2];
+      const actualMatch = body.match(/sessionId:\s*([0-9a-f]{20,})/i);
       seen.set(sid, (seen.get(sid) || 0) + 1);
       if (!map.has(sid)) {
-        map.set(sid, { duration: parseInt(match[1]), timestamp: entry.text?.timeUnixNano || 0, body });
+        map.set(sid, { duration: parseInt(match[1]), timestamp: entry.text?.timeUnixNano || 0, body, actualSessionId: actualMatch ? actualMatch[1] : null });
       }
     }
   }
@@ -377,6 +379,7 @@ function parseVerification(entries) {
 
 function parseSessionInit(entries) {
   // "session init sid: 4e6e24e2-f450-b459-56ee-8ad654cba98e appKey: ng8stbb0rvb94nb-eu deviceId: 04a398fb91d7dbe6"
+  // May also contain sessionId: {actualId}
   const map = new Map();
   const seen = new Map();
   for (const entry of entries) {
@@ -384,9 +387,10 @@ function parseSessionInit(entries) {
     const match = body.match(/session init sid:\s*([0-9a-f-]{36})/i);
     if (match) {
       const sid = match[1];
+      const actualMatch = body.match(/sessionId:\s*([0-9a-f]{20,})/i);
       seen.set(sid, (seen.get(sid) || 0) + 1);
       if (!map.has(sid)) {
-        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body });
+        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body, actualSessionId: actualMatch ? actualMatch[1] : null });
       }
     }
   }
@@ -395,7 +399,7 @@ function parseSessionInit(entries) {
 }
 
 function parseUpload(entries) {
-  // "session and replay data uploaded session: 8e883034-cca5-efb9-5ebd-67c5ee924c14 appId: ... sessionId: ..."
+  // "session and replay data uploaded session: 8e883034-cca5-efb9-5ebd-67c5ee924c14 appId: ... sessionId: 68aef03401223866d2d383c9"
   const map = new Map();
   const seen = new Map();
   for (const entry of entries) {
@@ -403,9 +407,10 @@ function parseUpload(entries) {
     const match = body.match(/session and replay data uploaded session:\s*([0-9a-f-]{36})/i);
     if (match) {
       const sid = match[1];
+      const actualMatch = body.match(/sessionId:\s*([0-9a-f]{20,})/i);
       seen.set(sid, (seen.get(sid) || 0) + 1);
       if (!map.has(sid)) {
-        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body });
+        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body, actualSessionId: actualMatch ? actualMatch[1] : null });
       }
     }
   }
@@ -479,8 +484,16 @@ function analyze() {
       journey = 'verification-only';         // dropped after verification
     }
 
+    // Collect actual session ID from whichever phase has it
+    const actualSessionId =
+      verificationMap.get(sid)?.actualSessionId ||
+      (hasInit && sessionInitMap.get(sid)?.actualSessionId) ||
+      (hasUpload && uploadMap.get(sid)?.actualSessionId) ||
+      null;
+
     sessions.push({
       sid,
+      actualSessionId,
       verification: true,
       sessionInit: hasInit,
       shrinkSession: hasInit && hasShrink,
@@ -495,8 +508,13 @@ function analyze() {
 
   for (const sid of sessionInitMap.keys()) {
     if (!verificationMap.has(sid)) {
+      const actualSessionId =
+        sessionInitMap.get(sid)?.actualSessionId ||
+        (uploadMap.has(sid) && uploadMap.get(sid)?.actualSessionId) ||
+        null;
       orphanSessions.push({
         sid,
+        actualSessionId,
         verification: false,
         sessionInit: true,
         shrinkSession: shrinkIdSet.has(sid.toLowerCase()),
@@ -510,6 +528,7 @@ function analyze() {
     if (!verificationMap.has(sid) && !sessionInitMap.has(sid)) {
       orphanSessions.push({
         sid,
+        actualSessionId: uploadMap.get(sid)?.actualSessionId || null,
         verification: false,
         sessionInit: false,
         shrinkSession: shrinkIdSet.has(sid.toLowerCase()),
@@ -789,7 +808,7 @@ function getFilteredSessions() {
   }
 
   if (searchFilter) {
-    list = list.filter(s => s.sid.includes(searchFilter));
+    list = list.filter(s => s.sid.includes(searchFilter) || (s.actualSessionId && s.actualSessionId.includes(searchFilter)));
   }
 
   return list;
@@ -816,8 +835,12 @@ function renderTable() {
   };
 
   const rows = page.map(s => {
+    const actualId = s.actualSessionId
+      ? `<span style="font-family:monospace;font-size:12px;color:#58a6ff;">${s.actualSessionId}</span>`
+      : '<span style="color:#484f58;">—</span>';
     return `<tr>
       <td style="font-family: monospace; font-size: 12px;">${s.sid}</td>
+      <td>${actualId}</td>
       <td>${checkMark(s.verification)}</td>
       <td>${checkMark(s.sessionInit)}</td>
       <td>${checkMark(s.shrinkSession)}</td>
@@ -831,6 +854,7 @@ function renderTable() {
       <thead>
         <tr>
           <th>Session ID</th>
+          <th>Actual Session ID</th>
           <th>Verification</th>
           <th>Session Init</th>
           <th>Shrink Session</th>
