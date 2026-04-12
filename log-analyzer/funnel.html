@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Funnel Analyzer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; min-height: 100vh; }
+
+  .header { padding: 24px 32px; border-bottom: 1px solid #21262d; }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header p { font-size: 13px; color: #8b949e; margin-top: 4px; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
+
+  /* Upload Section */
+  .upload-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+  .upload-card {
+    border: 2px dashed #30363d; border-radius: 12px; padding: 24px; text-align: center;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .upload-card:hover { border-color: #58a6ff; background: #161b22; }
+  .upload-card.loaded { border-color: #3fb950; border-style: solid; background: #0d1117; }
+  .upload-card .step-num { font-size: 28px; font-weight: 700; color: #58a6ff; }
+  .upload-card.loaded .step-num { color: #3fb950; }
+  .upload-card .step-label { font-size: 14px; font-weight: 600; margin: 8px 0 4px; }
+  .upload-card .step-desc { font-size: 12px; color: #8b949e; }
+  .upload-card .count { font-size: 12px; color: #3fb950; margin-top: 8px; font-weight: 600; }
+  .upload-card input { display: none; }
+
+  /* Analyze Button */
+  .analyze-btn {
+    display: block; width: 100%; padding: 14px; border: none; border-radius: 8px;
+    background: #238636; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+    margin-bottom: 32px; transition: background 0.2s;
+  }
+  .analyze-btn:hover { background: #2ea043; }
+  .analyze-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+
+  /* Funnel */
+  .funnel-section { margin-bottom: 32px; }
+  .funnel-section h2 { font-size: 16px; margin-bottom: 16px; color: #c9d1d9; }
+
+  .funnel { display: flex; align-items: stretch; gap: 0; margin-bottom: 24px; }
+  .funnel-step {
+    flex: 1; padding: 20px; text-align: center; position: relative;
+    background: #161b22; border: 1px solid #21262d;
+  }
+  .funnel-step:first-child { border-radius: 12px 0 0 12px; }
+  .funnel-step:last-child { border-radius: 0 12px 12px 0; }
+  .funnel-step .f-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .funnel-step .f-count { font-size: 32px; font-weight: 700; margin: 8px 0; }
+  .funnel-step .f-pct { font-size: 13px; font-weight: 600; }
+
+  .funnel-arrow {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 0 12px; color: #484f58; font-size: 12px;
+  }
+  .funnel-arrow .arrow { font-size: 20px; }
+  .funnel-arrow .dropoff { color: #f85149; font-weight: 600; font-size: 13px; margin-top: 2px; }
+
+  .color-green { color: #3fb950; }
+  .color-yellow { color: #d29922; }
+  .color-red { color: #f85149; }
+  .color-blue { color: #58a6ff; }
+
+  /* Bar chart */
+  .bar-row { display: flex; align-items: center; margin-bottom: 10px; }
+  .bar-label { width: 200px; font-size: 13px; color: #8b949e; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 28px; background: #21262d; border-radius: 6px; overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; border-radius: 6px; transition: width 0.6s ease; display: flex; align-items: center; padding-left: 10px; font-size: 12px; font-weight: 600; }
+  .bar-fill.green { background: #238636; }
+  .bar-fill.yellow { background: #9e6a03; }
+  .bar-fill.red { background: #da3633; }
+  .bar-value { margin-left: 12px; font-size: 13px; color: #c9d1d9; font-weight: 600; flex-shrink: 0; }
+
+  /* Tables */
+  .details-section { margin-top: 32px; }
+  .details-section h2 { font-size: 16px; margin-bottom: 12px; color: #c9d1d9; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+  .tab {
+    padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;
+    background: #21262d; color: #8b949e; border: none; transition: all 0.2s;
+  }
+  .tab.active { background: #30363d; color: #e1e4e8; }
+  .tab .badge { display: inline-block; background: #30363d; padding: 1px 7px; border-radius: 10px; font-size: 11px; margin-left: 6px; }
+  .tab.active .badge { background: #484f58; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: 600; }
+  td { padding: 10px 12px; border-bottom: 1px solid #21262d; }
+  tr:hover { background: #161b22; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  }
+  .tag-success { background: #0d2818; color: #3fb950; }
+  .tag-partial { background: #2a1c00; color: #d29922; }
+  .tag-fail { background: #2d0000; color: #f85149; }
+
+  .search-box {
+    width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #30363d;
+    background: #0d1117; color: #e1e4e8; font-size: 13px; margin-bottom: 12px;
+  }
+  .search-box:focus { outline: none; border-color: #58a6ff; }
+
+  .hidden { display: none; }
+
+  .summary-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .summary-card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 16px;
+  }
+  .summary-card .sc-label { font-size: 12px; color: #8b949e; }
+  .summary-card .sc-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+  .summary-card .sc-sub { font-size: 12px; color: #8b949e; margin-top: 2px; }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: #484f58; }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+
+  .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
+  .pagination button {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid #30363d;
+    background: #161b22; color: #c9d1d9; cursor: pointer; font-size: 12px;
+  }
+  .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pagination button.active { background: #30363d; }
+
+  .dup-banner {
+    background: #2a1c00; border: 1px solid #d29922; border-radius: 10px;
+    padding: 16px 20px; margin-bottom: 20px;
+  }
+  .dup-banner.clean { background: #0d2818; border-color: #3fb950; }
+  .dup-banner .dup-title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .dup-banner.clean .dup-title { color: #3fb950; }
+  .dup-banner .dup-title { color: #d29922; }
+  .dup-banner .dup-detail { font-size: 12px; color: #c9d1d9; margin: 4px 0; }
+  .dup-banner .dup-note { font-size: 11px; color: #8b949e; margin-top: 8px; }
+  .dup-expand { font-size: 12px; color: #58a6ff; cursor: pointer; background: none; border: none; margin-top: 6px; }
+  .dup-list { margin-top: 8px; max-height: 150px; overflow-y: auto; font-family: monospace; font-size: 11px; color: #8b949e; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Session Funnel Analyzer</h1>
+  <p>Upload verification, session init, shrink session, and upload logs (JSON or TSV) to visualize conversion and dropoff</p>
+</div>
+
+<div class="container">
+  <!-- Upload -->
+  <div class="upload-grid">
+    <label class="upload-card" id="card-verification">
+      <div class="step-num">1</div>
+      <div class="step-label">Verification Log</div>
+      <div class="step-desc">Verification took Xms for {sid} appKey: ...</div>
+      <div class="count hidden" id="count-verification"></div>
+      <input type="file" accept=".json,.tsv,.txt,.csv" onchange="handleFile(this, 'verification')">
+    </label>
+    <label class="upload-card" id="card-session-init">
+      <div class="step-num">2</div>
+      <div class="step-label">Session Init Log</div>
+      <div class="step-desc">session init sid: {sid} appKey: ... deviceId: ...</div>
+      <div class="count hidden" id="count-session-init"></div>
+      <input type="file" accept=".json,.tsv,.txt,.csv" onchange="handleFile(this, 'session-init')">
+    </label>
+    <label class="upload-card" id="card-shrink-session">
+      <div class="step-num">3</div>
+      <div class="step-label">Shrink Session Log</div>
+      <div class="step-desc">File containing session IDs to check existence after init</div>
+      <div class="count hidden" id="count-shrink-session"></div>
+      <input type="file" accept=".json,.tsv,.txt,.csv,.log" onchange="handleFile(this, 'shrink-session')">
+    </label>
+    <label class="upload-card" id="card-upload">
+      <div class="step-num">4</div>
+      <div class="step-label">Session & Replay Upload Log</div>
+      <div class="step-desc">session and replay data uploaded session: {sid} ...</div>
+      <div class="count hidden" id="count-upload"></div>
+      <input type="file" accept=".json,.tsv,.txt,.csv" onchange="handleFile(this, 'upload')">
+    </label>
+  </div>
+
+  <button class="analyze-btn" id="analyzeBtn" disabled onclick="analyze()">Upload all 4 files to analyze</button>
+
+  <!-- Results -->
+  <div id="results" class="hidden">
+    <!-- Duplicate Warning -->
+    <div id="dupBanner"></div>
+
+    <!-- Summary Cards -->
+    <div class="summary-cards" id="summaryCards"></div>
+
+    <!-- Funnel Visualization -->
+    <div class="funnel-section">
+      <h2>Conversion Funnel</h2>
+      <div class="funnel" id="funnelViz"></div>
+    </div>
+
+    <!-- Bar Chart -->
+    <div class="funnel-section">
+      <h2>Step-by-Step Breakdown</h2>
+      <div id="barChart"></div>
+    </div>
+
+    <!-- Detail Tables -->
+    <div class="details-section">
+      <h2>Session Details</h2>
+      <div class="tabs" id="tabs"></div>
+      <input type="text" class="search-box" placeholder="Search by session ID..." oninput="filterTable(this.value)">
+      <div id="tableContainer"></div>
+      <div class="pagination" id="pagination"></div>
+    </div>
+  </div>
+
+  <div id="emptyState" class="empty-state">
+    <div class="icon">&#8593;</div>
+    <div>Upload all four log files above to see the funnel analysis</div>
+  </div>
+</div>
+
+<script>
+const files = { verification: null, 'session-init': null, 'shrink-session': null, upload: null };
+let analysisResult = null;
+let currentTab = 'all';
+let currentPage = 0;
+let searchFilter = '';
+const PAGE_SIZE = 50;
+
+function handleFile(input, type) {
+  const file = input.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const raw = e.target.result;
+      const data = parseFileContent(raw, file.name);
+
+      files[type] = data;
+
+      const card = document.getElementById(`card-${type}`);
+      card.classList.add('loaded');
+      const countEl = document.getElementById(`count-${type}`);
+      const fmt = file.name.endsWith('.json') ? 'JSON' : 'TSV';
+      countEl.textContent = `${data.length} entries loaded (${fmt})`;
+      countEl.classList.remove('hidden');
+
+      updateAnalyzeBtn();
+    } catch (err) {
+      alert(`Failed to parse ${file.name}: ${err.message}`);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function parseFileContent(raw, filename) {
+  const trimmed = raw.trim();
+
+  // Try JSON first (starts with [ or {)
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    return JSON.parse(trimmed);
+  }
+
+  // Otherwise treat as TSV/CSV
+  return parseTsv(trimmed);
+}
+
+function parseTsv(text) {
+  const lines = text.split('\n');
+  if (lines.length < 2) throw new Error('TSV file has no data rows');
+
+  // Detect delimiter: tab or comma
+  const headerLine = lines[0];
+  const delimiter = headerLine.includes('\t') ? '\t' : ',';
+
+  const headers = headerLine.split(delimiter).map(h => h.trim().replace(/^"|"$/g, ''));
+
+  // Find the body column — look for common column names
+  const bodyAliases = ['body', 'log', 'message', 'msg', 'text', 'log.body', 'text.body', 'logrecord.body'];
+  let bodyIdx = headers.findIndex(h => bodyAliases.includes(h.toLowerCase()));
+
+  // Fallback: find the column that contains a known log pattern in the first data row
+  if (bodyIdx === -1 && lines.length > 1) {
+    const firstRow = splitTsvRow(lines[1], delimiter);
+    bodyIdx = firstRow.findIndex(cell =>
+      /Verification took|session init sid:|session and replay data uploaded/i.test(cell)
+    );
+  }
+
+  if (bodyIdx === -1) {
+    throw new Error(
+      'Could not find the log body column. Expected a column named: ' +
+      bodyAliases.join(', ') +
+      '. Found columns: ' + headers.join(', ')
+    );
+  }
+
+  const entries = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const cols = splitTsvRow(line, delimiter);
+    const body = (cols[bodyIdx] || '').trim();
+    if (!body) continue;
+
+    // Find timestamp column if available
+    const tsIdx = headers.findIndex(h =>
+      ['timestamp', 'time', 'datetime', 'date', 'metadata.timestamp', 'observedtimeunixnano', 'timeunixnano'].includes(h.toLowerCase())
+    );
+
+    entries.push({
+      text: {
+        body: body,
+        timeUnixNano: tsIdx !== -1 ? cols[tsIdx] : 0,
+      }
+    });
+  }
+
+  return entries;
+}
+
+function splitTsvRow(line, delimiter) {
+  // Handle quoted fields (e.g. fields containing the delimiter or newlines)
+  const fields = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++; // skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === delimiter && !inQuotes) {
+      fields.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(current);
+
+  return fields.map(f => f.replace(/^"|"$/g, ''));
+}
+
+function updateAnalyzeBtn() {
+  const allLoaded = files.verification && files['session-init'] && files['shrink-session'] && files.upload;
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled = !allLoaded;
+  btn.textContent = allLoaded ? 'Analyze Funnel' : 'Upload all 4 files to analyze';
+}
+
+// --- Parsers ---
+// Each parser returns { map, duplicates } where duplicates is an array of { sid, count }
+
+function parseVerification(entries) {
+  // "Verification took 85ms for 4e6e24e2-f450-b459-56ee-8ad654cba98e appKey: ng8stbb0rvb94nb-eu"
+  const map = new Map();
+  const seen = new Map(); // sid -> count
+  for (const entry of entries) {
+    const body = entry.text?.body || '';
+    const match = body.match(/Verification took (\d+)ms for ([0-9a-f-]{36})/i);
+    if (match) {
+      const sid = match[2];
+      seen.set(sid, (seen.get(sid) || 0) + 1);
+      if (!map.has(sid)) {
+        map.set(sid, { duration: parseInt(match[1]), timestamp: entry.text?.timeUnixNano || 0, body });
+      }
+    }
+  }
+  const duplicates = [...seen.entries()].filter(([, c]) => c > 1).map(([sid, count]) => ({ sid, count }));
+  return { map, duplicates };
+}
+
+function parseSessionInit(entries) {
+  // "session init sid: 4e6e24e2-f450-b459-56ee-8ad654cba98e appKey: ng8stbb0rvb94nb-eu deviceId: 04a398fb91d7dbe6"
+  const map = new Map();
+  const seen = new Map();
+  for (const entry of entries) {
+    const body = entry.text?.body || '';
+    const match = body.match(/session init sid:\s*([0-9a-f-]{36})/i);
+    if (match) {
+      const sid = match[1];
+      seen.set(sid, (seen.get(sid) || 0) + 1);
+      if (!map.has(sid)) {
+        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body });
+      }
+    }
+  }
+  const duplicates = [...seen.entries()].filter(([, c]) => c > 1).map(([sid, count]) => ({ sid, count }));
+  return { map, duplicates };
+}
+
+function parseUpload(entries) {
+  // "session and replay data uploaded session: 8e883034-cca5-efb9-5ebd-67c5ee924c14 appId: ... sessionId: ..."
+  const map = new Map();
+  const seen = new Map();
+  for (const entry of entries) {
+    const body = entry.text?.body || '';
+    const match = body.match(/session and replay data uploaded session:\s*([0-9a-f-]{36})/i);
+    if (match) {
+      const sid = match[1];
+      seen.set(sid, (seen.get(sid) || 0) + 1);
+      if (!map.has(sid)) {
+        map.set(sid, { timestamp: entry.text?.timeUnixNano || 0, body });
+      }
+    }
+  }
+  const duplicates = [...seen.entries()].filter(([, c]) => c > 1).map(([sid, count]) => ({ sid, count }));
+  return { map, duplicates };
+}
+
+function parseShrinkSession(entries) {
+  // Collect all unique session IDs found in the file.
+  // The file may contain session IDs in any format — scan for UUID patterns.
+  // Entries can be parsed structured objects (JSON/TSV) or raw text lines.
+  const idSet = new Set();
+  const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+  for (const entry of entries) {
+    const text = typeof entry === 'string'
+      ? entry
+      : (entry.text?.body || entry.body || JSON.stringify(entry));
+    const matches = text.match(uuidRe);
+    if (matches) {
+      for (const m of matches) idSet.add(m.toLowerCase());
+    }
+  }
+
+  return { idSet };
+}
+
+// --- Analysis ---
+
+function analyze() {
+  const verificationResult = parseVerification(files.verification);
+  const sessionInitResult = parseSessionInit(files['session-init']);
+  const shrinkResult = parseShrinkSession(files['shrink-session']);
+  const uploadResult = parseUpload(files.upload);
+
+  const verificationMap = verificationResult.map;
+  const sessionInitMap = sessionInitResult.map;
+  const shrinkIdSet = shrinkResult.idSet;
+  const uploadMap = uploadResult.map;
+
+  const duplicates = {
+    verification: verificationResult.duplicates,
+    sessionInit: sessionInitResult.duplicates,
+    upload: uploadResult.duplicates,
+  };
+
+  // --- Strict funnel: only track IDs that start in verification ---
+  // The funnel is: Verification → Session Init → Shrink Session → Upload
+  // An ID must pass each prior step to count in the next step.
+
+  const funnelSids = [...verificationMap.keys()]; // funnel starts here
+
+  const sessions = [];
+  for (const sid of funnelSids) {
+    const hasInit = sessionInitMap.has(sid);
+    const hasShrink = shrinkIdSet.has(sid.toLowerCase());
+    const hasUpload = uploadMap.has(sid);
+
+    // Determine the journey phase this session reached.
+    // Sessions can skip shrink: Verify → Init → Upload is valid (complete-skipped-shrink).
+    let journey;
+    if (hasInit && hasShrink && hasUpload) {
+      journey = 'complete';                  // full path through shrink
+    } else if (hasInit && !hasShrink && hasUpload) {
+      journey = 'complete-skipped-shrink';   // skipped shrink, still uploaded
+    } else if (hasInit && hasShrink && !hasUpload) {
+      journey = 'shrink-only';               // dropped after shrink
+    } else if (hasInit && !hasShrink && !hasUpload) {
+      journey = 'init-only';                 // dropped after init, no shrink, no upload
+    } else {
+      journey = 'verification-only';         // dropped after verification
+    }
+
+    sessions.push({
+      sid,
+      verification: true,
+      sessionInit: hasInit,
+      shrinkSession: hasInit && hasShrink,
+      upload: hasInit && hasUpload, // upload is valid with or without shrink
+      journey,
+      status: (journey === 'complete' || journey === 'complete-skipped-shrink') ? 'complete' : 'partial',
+    });
+  }
+
+  // --- Orphan IDs: present in session-init or upload but NOT in verification ---
+  const orphanSessions = [];
+
+  for (const sid of sessionInitMap.keys()) {
+    if (!verificationMap.has(sid)) {
+      orphanSessions.push({
+        sid,
+        verification: false,
+        sessionInit: true,
+        shrinkSession: shrinkIdSet.has(sid.toLowerCase()),
+        upload: uploadMap.has(sid),
+        journey: 'orphan-no-verification',
+        status: 'orphan',
+      });
+    }
+  }
+  for (const sid of uploadMap.keys()) {
+    if (!verificationMap.has(sid) && !sessionInitMap.has(sid)) {
+      orphanSessions.push({
+        sid,
+        verification: false,
+        sessionInit: false,
+        shrinkSession: shrinkIdSet.has(sid.toLowerCase()),
+        upload: true,
+        journey: 'orphan-upload-only',
+        status: 'orphan',
+      });
+    }
+  }
+
+  // Sort funnel sessions: complete first, then by journey stage
+  const journeyOrder = { 'complete': 0, 'complete-skipped-shrink': 1, 'shrink-only': 2, 'init-only': 3, 'verification-only': 4 };
+  sessions.sort((a, b) => {
+    if (journeyOrder[a.journey] !== journeyOrder[b.journey]) return journeyOrder[a.journey] - journeyOrder[b.journey];
+    return a.sid.localeCompare(b.sid);
+  });
+
+  orphanSessions.sort((a, b) => a.sid.localeCompare(b.sid));
+
+  // --- Funnel counts ---
+  const funnelVerified = sessions.length;
+  const funnelInit = sessions.filter(s => s.sessionInit).length;
+  const funnelShrink = sessions.filter(s => s.shrinkSession).length; // init sessions that appeared in shrink file
+  const funnelUploaded = sessions.filter(s => s.upload).length;      // all uploaded (with or without shrink)
+  const funnelSkippedShrink = sessions.filter(s => s.journey === 'complete-skipped-shrink').length;
+
+  const counts = {
+    funnelVerified,
+    funnelInit,
+    funnelShrink,
+    funnelUploaded,
+    funnelSkippedShrink,
+
+    // Dropoffs between funnel steps
+    dropAfterVerification: funnelVerified - funnelInit,
+    // Sessions that had init but neither shrink nor upload (true dropoffs after init)
+    dropAfterInit: sessions.filter(s => s.journey === 'init-only').length,
+    dropAfterShrink: sessions.filter(s => s.journey === 'shrink-only').length,
+
+    // Raw totals from each log file (for reference)
+    rawVerification: verificationMap.size,
+    rawSessionInit: sessionInitMap.size,
+    rawShrinkSession: shrinkIdSet.size,
+    rawUpload: uploadMap.size,
+
+    // Orphans
+    orphanCount: orphanSessions.length,
+  };
+
+  analysisResult = { sessions, orphanSessions, counts, duplicates };
+
+  renderResults();
+}
+
+// --- Rendering ---
+
+function renderResults() {
+  const { sessions, orphanSessions, counts, duplicates } = analysisResult;
+
+  document.getElementById('emptyState').classList.add('hidden');
+  document.getElementById('results').classList.remove('hidden');
+
+  renderDuplicateWarning(duplicates);
+  renderSummaryCards(counts, duplicates);
+  renderFunnel(counts);
+  renderBarChart(counts);
+  renderTabs(sessions, orphanSessions);
+  currentTab = 'all';
+  currentPage = 0;
+  searchFilter = '';
+  renderTable();
+}
+
+function renderDuplicateWarning(dups) {
+  const totalDups = dups.verification.length + dups.sessionInit.length + dups.upload.length;
+  const totalExtra = [dups.verification, dups.sessionInit, dups.upload]
+    .flat()
+    .reduce((sum, d) => sum + (d.count - 1), 0);
+
+  const el = document.getElementById('dupBanner');
+
+  if (totalDups === 0) {
+    el.innerHTML = `
+      <div class="dup-banner clean">
+        <div class="dup-title">No duplicates found</div>
+        <div class="dup-detail">All session IDs are unique within each log file. Counts are accurate.</div>
+      </div>`;
+    return;
+  }
+
+  function renderStepDups(label, list) {
+    if (list.length === 0) return '';
+    const extra = list.reduce((s, d) => s + (d.count - 1), 0);
+    const id = 'dup-list-' + label.replace(/\s/g, '-');
+    return `
+      <div class="dup-detail">
+        <strong>${label}:</strong> ${list.length} session(s) duplicated (${extra} extra entries removed)
+        <button class="dup-expand" onclick="document.getElementById('${id}').classList.toggle('hidden')">show IDs</button>
+        <div id="${id}" class="dup-list hidden">
+          ${list.map(d => `${d.sid} (${d.count}x)`).join('<br>')}
+        </div>
+      </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="dup-banner">
+      <div class="dup-title">Duplicates detected &mdash; ${totalDups} session(s), ${totalExtra} extra entries deduplicated</div>
+      ${renderStepDups('Verification', dups.verification)}
+      ${renderStepDups('Session Init', dups.sessionInit)}
+      ${renderStepDups('Data Upload', dups.upload)}
+      <div class="dup-note">Duplicates are excluded from all counts and funnel calculations. Only the first occurrence of each session ID is used.</div>
+    </div>`;
+}
+
+function renderSummaryCards(c, dups) {
+  const conversionRate = c.funnelVerified > 0 ? ((c.funnelUploaded / c.funnelVerified) * 100).toFixed(1) : '0.0';
+  const overallDropoff = c.funnelVerified > 0 ? (((c.funnelVerified - c.funnelUploaded) / c.funnelVerified) * 100).toFixed(1) : '0.0';
+  const totalDups = dups.verification.length + dups.sessionInit.length + dups.upload.length;
+
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="summary-card">
+      <div class="sc-label">Verified Sessions</div>
+      <div class="sc-value color-blue">${c.funnelVerified}</div>
+      <div class="sc-sub">Unique IDs in verification log (funnel entry)</div>
+    </div>
+    <div class="summary-card">
+      <div class="sc-label">Fully Converted</div>
+      <div class="sc-value color-green">${c.funnelUploaded}</div>
+      <div class="sc-sub">Uploaded${c.funnelSkippedShrink > 0 ? ' (' + c.funnelSkippedShrink + ' skipped shrink)' : ''}</div>
+    </div>
+    <div class="summary-card">
+      <div class="sc-label">End-to-End Conversion</div>
+      <div class="sc-value color-green">${conversionRate}%</div>
+      <div class="sc-sub">Verification &rarr; Upload</div>
+    </div>
+    <div class="summary-card">
+      <div class="sc-label">Overall Dropoff</div>
+      <div class="sc-value color-red">${overallDropoff}%</div>
+      <div class="sc-sub">${c.funnelVerified - c.funnelUploaded} sessions lost${totalDups > 0 ? ' | ' + totalDups + ' dups removed' : ''}${c.orphanCount > 0 ? ' | ' + c.orphanCount + ' orphans' : ''}</div>
+    </div>
+  `;
+}
+
+function renderFunnel(c) {
+  const s1 = c.funnelVerified;
+  const s2 = c.funnelInit;
+  const s3 = c.funnelShrink;
+  const s4 = c.funnelUploaded;
+  const skipped = c.funnelSkippedShrink;
+
+  const pct2 = s1 > 0 ? ((s2 / s1) * 100).toFixed(1) : '0.0';
+  const pct3 = s1 > 0 ? ((s3 / s1) * 100).toFixed(1) : '0.0';
+  const pct4 = s1 > 0 ? ((s4 / s1) * 100).toFixed(1) : '0.0';
+  const drop1to2 = s1 - s2;
+  const dropPct1 = s1 > 0 ? ((drop1to2 / s1) * 100).toFixed(1) : '0.0';
+  // Drop after init = sessions with init but no shrink AND no upload (true dropoff)
+  const dropPct2 = s2 > 0 ? ((c.dropAfterInit / s2) * 100).toFixed(1) : '0.0';
+  const dropPct3 = s3 > 0 ? ((c.dropAfterShrink / s3) * 100).toFixed(1) : '0.0';
+
+  const skippedNote = skipped > 0 ? `<div style="font-size:11px;color:#8b949e;margin-top:4px;">${skipped} skipped shrink</div>` : '';
+
+  document.getElementById('funnelViz').innerHTML = `
+    <div class="funnel-step">
+      <div class="f-label">Step 1: Verification</div>
+      <div class="f-count color-blue">${s1}</div>
+      <div class="f-pct">100%</div>
+    </div>
+    <div class="funnel-arrow">
+      <div class="arrow">&rarr;</div>
+      <div class="dropoff">&darr; ${drop1to2} (${dropPct1}%)</div>
+    </div>
+    <div class="funnel-step">
+      <div class="f-label">Step 2: Session Init</div>
+      <div class="f-count color-yellow">${s2}</div>
+      <div class="f-pct">${pct2}% of verified</div>
+    </div>
+    <div class="funnel-arrow">
+      <div class="arrow">&rarr;</div>
+      <div class="dropoff">&darr; ${c.dropAfterInit} (${dropPct2}%)</div>
+    </div>
+    <div class="funnel-step">
+      <div class="f-label">Step 3: Shrink Session</div>
+      <div class="f-count color-yellow">${s3}</div>
+      <div class="f-pct">${pct3}% of verified</div>
+      <div style="font-size:11px;color:#8b949e;margin-top:2px;">optional step</div>
+    </div>
+    <div class="funnel-arrow">
+      <div class="arrow">&rarr;</div>
+      <div class="dropoff">&darr; ${c.dropAfterShrink} (${dropPct3}%)</div>
+    </div>
+    <div class="funnel-step">
+      <div class="f-label">Step 4: Data Uploaded</div>
+      <div class="f-count color-green">${s4}</div>
+      <div class="f-pct">${pct4}% of verified</div>
+      ${skippedNote}
+    </div>
+  `;
+}
+
+function renderBarChart(c) {
+  const max = Math.max(c.funnelVerified, c.funnelInit, c.funnelShrink, c.funnelUploaded, 1);
+
+  const bars = [
+    { label: 'Verified (funnel entry)', value: c.funnelVerified, color: 'green' },
+    { label: 'Verified → Init', value: c.funnelInit, color: 'yellow' },
+    { label: 'Verified → Init → Shrink', value: c.funnelShrink, color: 'yellow' },
+    { label: 'Verified → ... → Uploaded', value: c.funnelUploaded, color: 'green' },
+    { label: 'Uploaded (skipped shrink)', value: c.funnelSkippedShrink, color: 'green' },
+    { label: 'Dropoff: Verify → Init', value: c.dropAfterVerification, color: 'red' },
+    { label: 'Dropoff: Init (no shrink/upload)', value: c.dropAfterInit, color: 'red' },
+    { label: 'Dropoff: Shrink → Upload', value: c.dropAfterShrink, color: 'red' },
+    { label: 'Orphans (no verification)', value: c.orphanCount, color: 'red' },
+  ];
+
+  document.getElementById('barChart').innerHTML = bars.map(b => `
+    <div class="bar-row">
+      <div class="bar-label">${b.label}</div>
+      <div class="bar-track">
+        <div class="bar-fill ${b.color}" style="width: ${(b.value / max) * 100}%"></div>
+      </div>
+      <div class="bar-value">${b.value}</div>
+    </div>
+  `).join('');
+}
+
+function renderTabs(sessions, orphanSessions) {
+  const completeAll = sessions.filter(s => s.status === 'complete').length;
+  const completeWithShrink = sessions.filter(s => s.journey === 'complete').length;
+  const completeSkipped = sessions.filter(s => s.journey === 'complete-skipped-shrink').length;
+  const dropVerify = sessions.filter(s => s.journey === 'verification-only').length;
+  const dropInit = sessions.filter(s => s.journey === 'init-only').length;
+  const dropShrink = sessions.filter(s => s.journey === 'shrink-only').length;
+  const orphans = orphanSessions.length;
+
+  document.getElementById('tabs').innerHTML = `
+    <button class="tab active" data-tab="all" onclick="switchTab('all', this)">All Funnel <span class="badge">${sessions.length}</span></button>
+    <button class="tab" data-tab="complete" onclick="switchTab('complete', this)">Complete <span class="badge">${completeAll}</span></button>
+    <button class="tab" data-tab="complete-skipped" onclick="switchTab('complete-skipped', this)">Skipped Shrink <span class="badge">${completeSkipped}</span></button>
+    <button class="tab" data-tab="drop-verify" onclick="switchTab('drop-verify', this)">Dropped after Verify <span class="badge">${dropVerify}</span></button>
+    <button class="tab" data-tab="drop-init" onclick="switchTab('drop-init', this)">Dropped after Init <span class="badge">${dropInit}</span></button>
+    <button class="tab" data-tab="drop-shrink" onclick="switchTab('drop-shrink', this)">Dropped after Shrink <span class="badge">${dropShrink}</span></button>
+    <button class="tab" data-tab="orphans" onclick="switchTab('orphans', this)">Orphans <span class="badge">${orphans}</span></button>
+  `;
+}
+
+function switchTab(tab, el) {
+  currentTab = tab;
+  currentPage = 0;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  renderTable();
+}
+
+function filterTable(value) {
+  searchFilter = value.toLowerCase().trim();
+  currentPage = 0;
+  renderTable();
+}
+
+function getFilteredSessions() {
+  let list;
+
+  if (currentTab === 'orphans') {
+    list = analysisResult.orphanSessions;
+  } else if (currentTab === 'complete') {
+    list = analysisResult.sessions.filter(s => s.status === 'complete');
+  } else if (currentTab === 'complete-skipped') {
+    list = analysisResult.sessions.filter(s => s.journey === 'complete-skipped-shrink');
+  } else if (currentTab === 'drop-verify') {
+    list = analysisResult.sessions.filter(s => s.journey === 'verification-only');
+  } else if (currentTab === 'drop-init') {
+    list = analysisResult.sessions.filter(s => s.journey === 'init-only');
+  } else if (currentTab === 'drop-shrink') {
+    list = analysisResult.sessions.filter(s => s.journey === 'shrink-only');
+  } else {
+    list = analysisResult.sessions; // 'all' — funnel sessions only
+  }
+
+  if (searchFilter) {
+    list = list.filter(s => s.sid.includes(searchFilter));
+  }
+
+  return list;
+}
+
+function renderTable() {
+  const list = getFilteredSessions();
+  const totalPages = Math.ceil(list.length / PAGE_SIZE);
+  const page = list.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+
+  const checkMark = (ok) => ok
+    ? '<span class="tag tag-success">&#10003;</span>'
+    : '<span class="tag tag-fail">&#10005;</span>';
+
+  const journeyLabel = (s) => {
+    if (s.journey === 'complete') return '<span class="tag tag-success">Complete</span>';
+    if (s.journey === 'complete-skipped-shrink') return '<span class="tag tag-success">Complete (skipped shrink)</span>';
+    if (s.journey === 'shrink-only') return '<span class="tag tag-partial">Dropped after Shrink</span>';
+    if (s.journey === 'init-only') return '<span class="tag tag-partial">Dropped after Init</span>';
+    if (s.journey === 'verification-only') return '<span class="tag tag-fail">Dropped after Verify</span>';
+    if (s.journey === 'orphan-no-verification') return '<span class="tag tag-partial">Orphan (no verify)</span>';
+    if (s.journey === 'orphan-upload-only') return '<span class="tag tag-fail">Orphan (upload only)</span>';
+    return '<span class="tag tag-fail">Unknown</span>';
+  };
+
+  const rows = page.map(s => {
+    return `<tr>
+      <td style="font-family: monospace; font-size: 12px;">${s.sid}</td>
+      <td>${checkMark(s.verification)}</td>
+      <td>${checkMark(s.sessionInit)}</td>
+      <td>${checkMark(s.shrinkSession)}</td>
+      <td>${checkMark(s.upload)}</td>
+      <td>${journeyLabel(s)}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('tableContainer').innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Session ID</th>
+          <th>Verification</th>
+          <th>Session Init</th>
+          <th>Shrink Session</th>
+          <th>Data Upload</th>
+          <th>Journey</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  // Pagination
+  if (totalPages > 1) {
+    let phtml = '';
+    const prev = currentPage > 0;
+    const next = currentPage < totalPages - 1;
+    phtml += `<button ${prev ? '' : 'disabled'} onclick="changePage(${currentPage - 1})">&laquo; Prev</button>`;
+    phtml += `<button disabled style="border:none;background:none;color:#8b949e;">Page ${currentPage + 1} of ${totalPages} (${list.length} sessions)</button>`;
+    phtml += `<button ${next ? '' : 'disabled'} onclick="changePage(${currentPage + 1})">Next &raquo;</button>`;
+    document.getElementById('pagination').innerHTML = phtml;
+    document.getElementById('pagination').classList.remove('hidden');
+  } else {
+    document.getElementById('pagination').innerHTML = `<span style="color:#484f58;font-size:12px;">${list.length} sessions</span>`;
+  }
+}
+
+function changePage(p) {
+  currentPage = p;
+  renderTable();
+}
+</script>
+</body>
+</html>

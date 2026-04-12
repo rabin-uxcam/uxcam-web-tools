@@ -63,7 +63,7 @@ async function convert(batchBuffers, sessionName, opts = {}) {
 	// always receives uniform frames.
 	const vf = [
 		`scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease`,
-		`pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
+		`pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:0:0:color=black`,
 		'format=yuv420p',
 	].join(',')
 

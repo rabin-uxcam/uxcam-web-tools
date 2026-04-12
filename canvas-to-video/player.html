@@ -635,8 +635,11 @@ function updateClickDots(timeSec) {
 	const displayH = videoRect.height;
 
 	const dpr = dataJson?.device?.dpi || window.devicePixelRatio || 1;
-	const viewportW = (video.videoWidth || 1) / dpr;
-	const viewportH = (video.videoHeight || 1) / dpr;
+	// Use display dimensions from data.json as the CSS viewport reference.
+	// video.videoWidth / dpr is wrong because frames are downscaled during capture
+	// (CANVAS_TARGET_RESOLUTION HD 1280x720), so videoWidth / dpr << actual viewport.
+	const viewportW = dataJson?.device?.dwt || (video.videoWidth || 1) / dpr;
+	const viewportH = dataJson?.device?.dht || (video.videoHeight || 1) / dpr;
 
 	function toScreen(cx, cy) {
 		return {
@@ -1289,8 +1292,11 @@ function binUpdateClickDots(timeSec) {
 	const displayH = videoRect.height;
 
 	const dpr = binDataJson?.device?.dpi || window.devicePixelRatio || 1;
-	const viewportW = (binVideo.videoWidth || 1) / dpr;
-	const viewportH = (binVideo.videoHeight || 1) / dpr;
+	// Use display dimensions from data.json as the CSS viewport reference.
+	// video.videoWidth / dpr is wrong because frames are downscaled during capture
+	// (CANVAS_TARGET_RESOLUTION HD 1280x720), so videoWidth / dpr << actual viewport.
+	const viewportW = binDataJson?.device?.dwt || (binVideo.videoWidth || 1) / dpr;
+	const viewportH = binDataJson?.device?.dht || (binVideo.videoHeight || 1) / dpr;
 
 	function toScreen(cx, cy) {
 		return {

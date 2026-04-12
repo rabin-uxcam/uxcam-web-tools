@@ -156,14 +156,21 @@ export async function writeSourceFrames(allFrames, framesDir, maxW, maxH, hasVar
 	const sharp = (await import('sharp')).default
 	const paths = []
 
+	// Extend when sizes vary OR when any source frame has odd dimensions
+	// (codecs require even dimensions; maxW/maxH are already rounded to even)
+	const needsExtend = hasVaryingSizes || allFrames.some((f) => f.width % 2 !== 0 || f.height % 2 !== 0)
+
 	for (let i = 0; i < allFrames.length; i++) {
 		const frame = allFrames[i]
 		const framePath = join(framesDir, `src-${String(i).padStart(5, '0')}.webp`)
 
-		if (hasVaryingSizes) {
+		if (needsExtend) {
 			await sharp(Buffer.from(frame.data))
-				.resize(maxW, maxH, {
-					fit: 'contain',
+				.extend({
+					top: 0,
+					left: 0,
+					bottom: Math.max(0, maxH - frame.height),
+					right: Math.max(0, maxW - frame.width),
 					background: { r: 0, g: 0, b: 0, alpha: 1 },
 				})
 				.webp({ quality: 80 })

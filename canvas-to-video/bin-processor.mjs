@@ -191,10 +191,45 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 		const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
 
 		if (needsResize) {
-			await sharp(allFrames[i].data)
-				.resize(maxW, maxH, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 1 } })
-				.webp({ quality: 80 })
-				.toFile(framePath)
+			const frame = allFrames[i]
+			const padBottom = Math.max(0, maxH - frame.height)
+			const padRight = Math.max(0, maxW - frame.width)
+
+			if (padBottom > 0 || padRight > 0) {
+				// Center text in the larger visible gray strip (bottom or right)
+				const bottomArea = maxW * padBottom
+				const rightArea = padRight * frame.height
+				let textX, textY
+				if (bottomArea >= rightArea) {
+					// Center in bottom strip
+					textX = maxW / 2
+					textY = frame.height + padBottom / 2
+				} else {
+					// Center in right strip
+					textX = frame.width + padRight / 2
+					textY = frame.height / 2
+				}
+				const fillerSvg = Buffer.from(
+					`<svg width="${maxW}" height="${maxH}" xmlns="http://www.w3.org/2000/svg">
+						<rect width="${maxW}" height="${maxH}" fill="rgb(193,195,197)"/>
+						<text x="${textX}" y="${textY}"
+							font-family="Arial, sans-serif" font-size="24" font-weight="bold"
+							fill="#ffffff" text-anchor="middle" dominant-baseline="middle">
+							Window Resized
+						</text>
+					</svg>`
+				)
+				const fillerBg = await sharp(fillerSvg).webp().toBuffer()
+
+				// Composite the actual frame on top of the gray filler
+				await sharp(fillerBg)
+					.composite([{ input: frame.data, top: 0, left: 0 }])
+					.webp({ quality: 100 })
+					.toFile(framePath)
+			} else {
+				// Frame matches max dimensions but may have odd dimensions — just re-encode
+				await sharp(frame.data).webp({ quality: 100 }).toFile(framePath)
+			}
 		} else {
 			writeFileSync(framePath, allFrames[i].data)
 		}

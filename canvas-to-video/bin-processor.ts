@@ -6,10 +6,18 @@ import sharp from 'sharp'
 
 import { createLogger } from '../lib/logger'
 import { deleteFolder } from '../lib/delete-folder'
-import { FfmpegEncodeError } from '../lib/errors'
+import { FfmpegEncodeError, QueryReadTimeoutError } from '../lib/errors'
+import { rollbar } from '../lib/rollbar'
 import { S3Service } from './s3-service'
-import { MongoId } from '../models/mongo'
+import { StatsService } from './stats-service'
+import { KinesisService } from './kinesis-service'
+import { MongoId, toStringId } from '../models/mongo'
 import { constructS3PathForVideoFile, getTemporaryDownloadFolderName } from '../models/s3'
+import { SessionVideoRecord, createSessionVideoRecord } from '../models/session'
+import { DevicePlatform } from '../models/device'
+import { isQueryTimeoutError, PgRepository } from '../respository/pg'
+import { CacheRepository } from '../respository/cache'
+import { config } from '../config'
 
 export interface BatchBuffer {
   name: string
@@ -29,7 +37,15 @@ export interface BinProcessingService {
 
 const LAST_FRAME_HOLD_MS = 500
 
-export function BinProcessingService(s3Service: S3Service, ffmpegBinaryPath: string, tempDownloadFolder: string): BinProcessingService {
+export function BinProcessingService(
+  s3Service: S3Service,
+  ffmpegBinaryPath: string,
+  tempDownloadFolder: string,
+  pgRepository: PgRepository,
+  statsService: StatsService,
+  kinesisService: KinesisService,
+  cacheRepository: CacheRepository,
+): BinProcessingService {
   const logger = createLogger(BinProcessingService)
 
   async function process(batchBuffers: BatchBuffer[], orgId: MongoId, appId: MongoId, sessionId: MongoId, bucket: string): Promise<void> {
@@ -78,6 +94,60 @@ export function BinProcessingService(s3Service: S3Service, ffmpegBinaryPath: str
       // Verify upload
       const exists = await s3Service.doesObjectExist(bucket, s3Key)
       log.info({ s3Key, bucket, exists }, 'Video upload verification')
+
+      // --- Post-upload processing (DB, cache, Kinesis) ---
+      log.info('Starting post-upload processing')
+
+      // 1. Get uploadedTime from Redis cache, with fallback
+      const uploadedOnFromCache = await cacheRepository.getUploadedOn(sessionId)
+      const uploadedTime = uploadedOnFromCache || new Date().toISOString()
+
+      // 2. Mark video as available in Citus (PG)
+      try {
+        await pgRepository.markVideoAsAvailable(toStringId(appId), toStringId(sessionId), uploadedTime)
+      } catch (error) {
+        log.error(error, 'Error while updating session row to mark video as available')
+        if (isQueryTimeoutError(error)) {
+          throw new QueryReadTimeoutError()
+        }
+        throw error
+      }
+
+      // 3. Add to Redis Bloom Filter
+      try {
+        log.info('Adding video to BF')
+        await cacheRepository.setVideoAlreadyProcessed(sessionId)
+      } catch (error) {
+        const msg = 'Error while adding video to BF'
+        log.error({ error }, msg)
+        rollbar.error({ error, orgId, appId, sessionId }, msg)
+      }
+
+      // 4. Determine Kinesis stream and push session video record
+      const stats = await statsService.getCurrentStatsByOrgId(orgId)
+      const currentDebugSessionCount = stats && stats.webSession ? stats.webSession : 0
+      const shouldSendToDebugPipeline = currentDebugSessionCount < config.totalDebugSessionAllowedPerMonth
+      const videoStream = shouldSendToDebugPipeline ? config.kinesis.debugStreamName : config.kinesis.sessionStreamName
+
+      const sessionVideo = createSessionVideoRecord(orgId, appId, sessionId, uploadedTime)
+      try {
+        log.info({ stream: videoStream }, 'Pushing sessionvideo to kinesis')
+        await kinesisService.putRecord<SessionVideoRecord>(videoStream, sessionVideo, 'sessionvideo')
+      } catch (error) {
+        const msg = 'Failed to push session replay json to kinesis'
+        rollbar.error(msg, error, { orgId, appId, sessionId })
+        log.error({ error }, msg)
+      }
+
+      // 5. Increment video count in Mongo
+      log.info('Increasing video count')
+      try {
+        await statsService.incrementOrganizationVideoCount(orgId, appId, 1, DevicePlatform.Web)
+      } catch (error) {
+        const msg = 'Error while incrementing processed video count'
+        rollbar.error(error, msg, { appId, sessionId, orgId })
+        log.error(error, msg)
+      }
     } finally {
       // i) Cleanup
       await deleteFolder(workDir)
@@ -98,9 +168,8 @@ export function BinProcessingService(s3Service: S3Service, ffmpegBinaryPath: str
  * so we attempt outer decompression first before parsing the inner binary format.
  */
 function parseBatchBuffers(batchBuffers: BatchBuffer[]): ParsedFrame[] {
-  const log = createLogger('parseBatchBuffers')
   const allFrames: ParsedFrame[] = []
-
+  const log = createLogger('parseBatchBuffers')
   for (const { name, buffer } of batchBuffers) {
     log.info({ name, bufferSize: buffer.length }, 'Processing bin file')
 
@@ -186,10 +255,45 @@ async function writeFrames(allFrames: ParsedFrame[], workDir: string, maxW: numb
     const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
 
     if (needsResize) {
-      await sharp(allFrames[i].data)
-        .resize(maxW, maxH, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 1 } })
-        .webp({ quality: 80 })
-        .toFile(framePath)
+      const frame = allFrames[i]
+      const padBottom = Math.max(0, maxH - frame.height)
+      const padRight = Math.max(0, maxW - frame.width)
+
+      if (padBottom > 0 || padRight > 0) {
+        // Center text in the larger visible gray strip (bottom or right)
+        const bottomArea = maxW * padBottom
+        const rightArea = padRight * frame.height
+        let textX: number, textY: number
+        if (bottomArea >= rightArea) {
+          // Center in bottom strip
+          textX = maxW / 2
+          textY = frame.height + padBottom / 2
+        } else {
+          // Center in right strip
+          textX = frame.width + padRight / 2
+          textY = frame.height / 2
+        }
+        const fillerSvg = Buffer.from(
+          `<svg width="${maxW}" height="${maxH}" xmlns="http://www.w3.org/2000/svg">
+						<rect width="${maxW}" height="${maxH}" fill="rgb(193,195,197)"/>
+						<text x="${textX}" y="${textY}"
+							font-family="Arial, sans-serif" font-size="24" font-weight="bold"
+							fill="#ffffff" text-anchor="middle" dominant-baseline="middle">
+							Window Resized
+						</text>
+					</svg>`,
+        )
+        const fillerBg = await sharp(fillerSvg).webp().toBuffer()
+
+        // Composite the actual frame on top of the gray filler
+        await sharp(fillerBg)
+          .composite([{ input: frame.data, top: 0, left: 0 }])
+          .webp({ quality: 100 })
+          .toFile(framePath)
+      } else {
+        // Frame matches max dimensions but may have odd dimensions — just re-encode
+        await sharp(frame.data).webp({ quality: 100 }).toFile(framePath)
+      }
     } else {
       writeFileSync(framePath, allFrames[i].data)
     }
