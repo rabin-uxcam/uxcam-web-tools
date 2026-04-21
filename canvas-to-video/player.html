@@ -631,20 +631,22 @@ function updateClickDots(timeSec) {
 	const wrapRect = wrap.getBoundingClientRect();
 	const offsetX = videoRect.left - wrapRect.left;
 	const offsetY = videoRect.top - wrapRect.top;
-	const displayW = videoRect.width;
-	const displayH = videoRect.height;
 
-	const dpr = dataJson?.device?.dpi || window.devicePixelRatio || 1;
-	// Use display dimensions from data.json as the CSS viewport reference.
-	// video.videoWidth / dpr is wrong because frames are downscaled during capture
-	// (CANVAS_TARGET_RESOLUTION HD 1280x720), so videoWidth / dpr << actual viewport.
-	const viewportW = dataJson?.device?.dwt || (video.videoWidth || 1) / dpr;
-	const viewportH = dataJson?.device?.dht || (video.videoHeight || 1) / dpr;
+	// <video> uses object-fit: contain — compute the real content box so
+	// clicks don't drift into the letterbox padding.
+	const vidW = video.videoWidth || 1;
+	const vidH = video.videoHeight || 1;
+	const containScale = Math.min(videoRect.width / vidW, videoRect.height / vidH);
+	const contentW = vidW * containScale;
+	const contentH = vidH * containScale;
+	const padX = (videoRect.width - contentW) / 2;
+	const padY = (videoRect.height - contentH) / 2;
 
-	function toScreen(cx, cy) {
+	// Clicks are canvas-relative fractions (0..1) — map directly to content box.
+	function toScreen(fx, fy) {
 		return {
-			x: offsetX + (cx / viewportW) * displayW,
-			y: offsetY + (cy / viewportH) * displayH,
+			x: offsetX + padX + fx * contentW,
+			y: offsetY + padY + fy * contentH,
 		};
 	}
 
@@ -1288,20 +1290,22 @@ function binUpdateClickDots(timeSec) {
 	const wrapRect = wrap.getBoundingClientRect();
 	const offsetX = videoRect.left - wrapRect.left;
 	const offsetY = videoRect.top - wrapRect.top;
-	const displayW = videoRect.width;
-	const displayH = videoRect.height;
 
-	const dpr = binDataJson?.device?.dpi || window.devicePixelRatio || 1;
-	// Use display dimensions from data.json as the CSS viewport reference.
-	// video.videoWidth / dpr is wrong because frames are downscaled during capture
-	// (CANVAS_TARGET_RESOLUTION HD 1280x720), so videoWidth / dpr << actual viewport.
-	const viewportW = binDataJson?.device?.dwt || (binVideo.videoWidth || 1) / dpr;
-	const viewportH = binDataJson?.device?.dht || (binVideo.videoHeight || 1) / dpr;
+	// <video> uses object-fit: contain — compute the real content box so
+	// clicks don't drift into the letterbox padding.
+	const vidW = binVideo.videoWidth || 1;
+	const vidH = binVideo.videoHeight || 1;
+	const containScale = Math.min(videoRect.width / vidW, videoRect.height / vidH);
+	const contentW = vidW * containScale;
+	const contentH = vidH * containScale;
+	const padX = (videoRect.width - contentW) / 2;
+	const padY = (videoRect.height - contentH) / 2;
 
-	function toScreen(cx, cy) {
+	// Clicks are canvas-relative fractions (0..1) — map directly to content box.
+	function toScreen(fx, fy) {
 		return {
-			x: offsetX + (cx / viewportW) * displayW,
-			y: offsetY + (cy / viewportH) * displayH,
+			x: offsetX + padX + fx * contentW,
+			y: offsetY + padY + fy * contentH,
 		};
 	}
 
