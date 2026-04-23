@@ -92,13 +92,16 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
  *
  * Wire format (produced by packBatch):
  *   [4-byte gzipped-JSON len (big-endian)][gzipped JSON metadata][raw WebP blobs]
- *   JSON: [{ t, sz, w, h }, ...]
+ *   JSON: [{ t, sz, w, h, s }, ...]
+ *     s = session start epoch (ms). Redundant per-frame so any bin can self-anchor,
+ *         even when earlier bins are missing.
  *
  * The .bin files stored in S3 may be gzipped at the outer level,
  * so we attempt outer decompression first before parsing the inner binary format.
  */
 function parseBatchBuffers(batchBuffers) {
 	const allFrames = []
+	const startTimesSeen = new Set()
 
 	for (const { name, buffer } of batchBuffers) {
 		console.log(`[bin-processor] Processing ${name} (${buffer.length} bytes)`)
@@ -119,15 +122,23 @@ function parseBatchBuffers(batchBuffers) {
 				const frameData = raw.subarray(dataStart + cursor, dataStart + cursor + f.sz)
 				cursor += f.sz
 				allFrames.push({ time: f.t, width: f.w, height: f.h, data: Buffer.from(frameData) })
+				if (typeof f.s === 'number' && f.s > 0) startTimesSeen.add(f.s)
 			}
 
-			console.log(`[bin-processor] ${name}: ${meta.length} frames extracted`)
+			const firstT = meta[0]?.t
+			const lastT = meta[meta.length - 1]?.t
+			const startTime = meta[0]?.s
+			console.log(`[bin-processor] ${name}: ${meta.length} frames, t=[${firstT}..${lastT}]${startTime ? ` s=${startTime}` : ''}`)
 		} catch (err) {
 			console.warn(`[bin-processor] Failed to parse ${name}: ${err.message} — skipping`)
 		}
 	}
 
-	console.log(`[bin-processor] Total: ${allFrames.length} frames from ${batchBuffers.length} file(s)`)
+	if (startTimesSeen.size > 1) {
+		console.warn(`[bin-processor] ⚠ Multiple startTimes across bins: ${[...startTimesSeen].join(', ')} — timestamps may be misaligned`)
+	}
+
+	console.log(`[bin-processor] Total: ${allFrames.length} frames from ${batchBuffers.length} file(s), unique startTimes=${startTimesSeen.size}`)
 	return allFrames
 }
 
@@ -270,8 +281,15 @@ function runFfmpeg(concatPath, outputVideo) {
 			'libx265',
 			'-pix_fmt',
 			'yuv420p',
-			'-vsync',
-			'vfr',
+			// fps_mode=passthrough preserves per-frame durations from the concat
+			// demuxer exactly. -vsync vfr (legacy) rounds durations to the output
+			// timebase and can compress time at high capture rates.
+			'-fps_mode',
+			'passthrough',
+			// Output timebase at 1ms granularity so 33ms frame durations (30 fps
+			// capture) survive without rounding.
+			'-video_track_timescale',
+			'1000',
 			'-crf',
 			'28',
 			'-preset',

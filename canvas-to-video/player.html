@@ -108,6 +108,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 <div class="tab-bar">
 	<div class="tab active" data-tab="player">Player</div>
 	<div class="tab" data-tab="bin-processor">Bin Processor</div>
+	<div class="tab" data-tab="bin-player">Bin Player</div>
 	<div class="tab" data-tab="benchmark">Benchmark</div>
 </div>
 
@@ -239,6 +240,58 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 </div>
 
 </div><!-- /panel-bin-processor -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Bin Player tab — plays frames directly from .bin timestamps (no ffmpeg) -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-bin-player">
+
+<div class="header">
+	<label>MinIO:</label>
+	<input type="text" id="bpMinioUrl" value="http://localhost:9000" placeholder="MinIO endpoint">
+	<button id="bpListBtn">List</button>
+	<label>Session:</label>
+	<select id="bpSessionSelect"><option value="">-- click List --</option></select>
+	<label>data.json:</label>
+	<select id="bpDataSelect"><option value="">-- click List --</option></select>
+	<button id="bpLoadBtn" disabled>Load Frames</button>
+	<span class="status" id="bpStatus"></span>
+</div>
+
+<div class="main">
+	<div class="canvas-wrap" id="bpCanvasWrap">
+		<img id="bpImage" style="max-width:100%;max-height:100%;object-fit:contain;background:#000;" alt="">
+		<div class="screen-banner" id="bpBanner">No session loaded</div>
+		<div class="loading hidden" id="bpLoading">
+			<div class="spinner"></div>
+			<div class="progress-text" id="bpLoadingText">Loading frames...</div>
+		</div>
+	</div>
+	<div class="sidebar">
+		<div class="sidebar-title">Events</div>
+		<div class="event-log" id="bpEventLog"></div>
+	</div>
+</div>
+
+<div class="controls">
+	<div class="controls-row">
+		<button id="bpPlayBtn" title="Space">&#9654;</button>
+		<span class="time-display" id="bpTimeDisplay">0:00.0 / 0:00.0</span>
+		<span class="speed bp-speed" data-speed="0.5">0.5x</span>
+		<span class="speed bp-speed active" data-speed="1">1x</span>
+		<span class="speed bp-speed" data-speed="2">2x</span>
+		<span class="speed bp-speed" data-speed="4">4x</span>
+		<span style="flex:1"></span>
+		<span id="bpFrameInfo" style="font-size:12px;color:#888;"></span>
+	</div>
+	<div class="timeline-wrap" id="bpTimelineWrap">
+		<div class="timeline-bar"></div>
+		<div class="timeline-progress" id="bpTimelineProgress"></div>
+		<div class="timeline-thumb" id="bpTimelineThumb"></div>
+	</div>
+</div>
+
+</div><!-- /panel-bin-player -->
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1421,6 +1474,502 @@ document.getElementById('binTimelineWrap').addEventListener('click', (e) => {
 		const rect = wrap.getBoundingClientRect();
 		const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
 		binSeekTo(pct * (binVideo.duration || 0));
+	});
+	document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bin Player tab — plays frames using raw .bin timestamps (no ffmpeg step)
+//
+// Purpose: verify whether the timestamps stored inside the .bin files are
+// accurate, so we can measure drift between the bin timeline and the
+// ffmpeg-encoded MP4 timeline. This path skips video encoding entirely —
+// frames are decoded on the server, their raw timestamps flow to the
+// browser, and an RAF loop paces an <img> element from those timestamps.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const bpImage = document.getElementById('bpImage');
+let bpFrames = [];			// [{ time (ms), width, height, objectUrl }]
+let bpDataJson = null;
+let bpScreenTimeline = [];
+let bpEvents = [];
+let bpFirstFrameMs = 0;		// first frame time in ms (anchor = 0 on timeline)
+let bpDurationSec = 0;
+let bpPlaying = false;
+let bpCurrentSec = 0;		// current playhead (seconds, zero-anchored at first frame)
+let bpLastTickMs = 0;
+let bpSpeed = 1;
+let bpRafId = null;
+let bpCurrentFrameIdx = -1;
+
+// ─── List sessions + data files ─────────────────────────────────────────────
+
+document.getElementById('bpListBtn').addEventListener('click', bpListAll);
+
+async function bpListAll() {
+	const sessionSelect = document.getElementById('bpSessionSelect');
+	const dataSelect = document.getElementById('bpDataSelect');
+	sessionSelect.innerHTML = '<option value="">Loading...</option>';
+	dataSelect.innerHTML = '<option value="">Loading...</option>';
+	document.getElementById('bpStatus').textContent = 'Listing MinIO contents...';
+
+	try {
+		const canvasXml = await minioList('sessions/canvas/', '/', 'bpMinioUrl');
+		const prefixes = [...canvasXml.querySelectorAll('CommonPrefixes > Prefix')];
+		sessionSelect.innerHTML = '';
+
+		if (prefixes.length === 0) {
+			sessionSelect.innerHTML = '<option value="">No sessions found</option>';
+		} else {
+			prefixes.forEach(p => {
+				const sid = p.textContent.replace('sessions/canvas/', '').replace(/\/$/, '');
+				const opt = document.createElement('option');
+				opt.value = sid;
+				opt.textContent = sid;
+				sessionSelect.appendChild(opt);
+			});
+			sessionSelect.selectedIndex = sessionSelect.options.length - 1;
+		}
+
+		const dataXml = await minioList('sessions/data/', null, 'bpMinioUrl');
+		const allKeys = [...dataXml.querySelectorAll('Contents > Key')].map(k => k.textContent);
+		const dataFiles = allKeys.filter(k => k.endsWith('.json') || k.endsWith('.json.gz'));
+		dataSelect.innerHTML = '';
+
+		if (dataFiles.length === 0) {
+			dataSelect.innerHTML = '<option value="">No data files found</option>';
+		} else {
+			const noneOpt = document.createElement('option');
+			noneOpt.value = '';
+			noneOpt.textContent = '(none - auto-detect)';
+			dataSelect.appendChild(noneOpt);
+
+			dataFiles.forEach(key => {
+				const opt = document.createElement('option');
+				opt.value = key;
+				opt.textContent = key;
+				dataSelect.appendChild(opt);
+			});
+			dataSelect.selectedIndex = dataSelect.options.length - 1;
+		}
+
+		document.getElementById('bpLoadBtn').disabled = false;
+		document.getElementById('bpStatus').textContent =
+			`Found ${prefixes.length} session(s), ${dataFiles.length} data file(s)`;
+	} catch (e) {
+		sessionSelect.innerHTML = '<option value="">Error</option>';
+		dataSelect.innerHTML = '<option value="">Error</option>';
+		document.getElementById('bpStatus').textContent = `Error: ${e.message}`;
+	}
+}
+
+// ─── Load frames + data.json ────────────────────────────────────────────────
+
+document.getElementById('bpLoadBtn').addEventListener('click', bpLoadSession);
+
+function bpRevokeFrames() {
+	for (const f of bpFrames) {
+		if (f.objectUrl) URL.revokeObjectURL(f.objectUrl);
+	}
+	bpFrames = [];
+}
+
+async function bpLoadSession() {
+	const sessionId = document.getElementById('bpSessionSelect').value;
+	if (!sessionId) return;
+
+	const minioUrl = document.getElementById('bpMinioUrl').value.replace(/\/+$/, '');
+	const loadingEl = document.getElementById('bpLoading');
+
+	loadingEl.classList.remove('hidden');
+	document.getElementById('bpLoadingText').textContent = 'Decoding bin frames...';
+	document.getElementById('bpLoadBtn').disabled = true;
+	bpPause();
+	bpRevokeFrames();
+	bpDataJson = null;
+
+	try {
+		const resp = await fetch('/bin-frames', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ sessionId, minioUrl }),
+		});
+		const data = await resp.json();
+		if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+		// Turn base64 WebP frames into blob URLs for <img> src rendering
+		document.getElementById('bpLoadingText').textContent = `Building ${data.frameCount} frame blobs...`;
+		bpFrames = data.frames.map(f => {
+			const bin = atob(f.dataBase64);
+			const bytes = new Uint8Array(bin.length);
+			for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+			const blob = new Blob([bytes], { type: 'image/webp' });
+			return {
+				time: f.time,
+				width: f.width,
+				height: f.height,
+				batch: f.batch,
+				objectUrl: URL.createObjectURL(blob),
+			};
+		});
+
+		bpFirstFrameMs = bpFrames[0].time;
+		bpDurationSec = (bpFrames[bpFrames.length - 1].time - bpFirstFrameMs) / 1000;
+
+		// Load data.json (optional sidebar + timeline markers)
+		document.getElementById('bpLoadingText').textContent = 'Loading data.json...';
+		const dataKey = document.getElementById('bpDataSelect').value;
+		if (dataKey) {
+			bpDataJson = await bpFetchDataJson(dataKey);
+		} else {
+			bpDataJson = await bpFindDataJson(sessionId);
+		}
+
+		if (bpDataJson) {
+			bpScreenTimeline = bpDataJson.st || [];
+			bpEvents = bpDataJson.evt || [];
+		} else {
+			bpScreenTimeline = [];
+			bpEvents = [];
+		}
+
+		document.getElementById('bpStatus').textContent =
+			`${bpFrames.length} frames across ${data.batchCount} batch(es), ` +
+			`span ${bpDurationSec.toFixed(2)}s, first t=${(bpFirstFrameMs/1000).toFixed(3)}s` +
+			(bpDataJson ? `, ${bpEvents.length} events, ${bpScreenTimeline.length} screens` : ', no data.json');
+
+		bpCurrentSec = 0;
+		bpCurrentFrameIdx = -1;
+		bpBuildTimeline();
+		bpBuildEventLog();
+		bpRenderFrameAt(0);
+		bpUpdateTimeDisplay();
+		bpUpdateTimelinePosition();
+		loadingEl.classList.add('hidden');
+	} catch (e) {
+		loadingEl.classList.add('hidden');
+		document.getElementById('bpStatus').textContent = `Error: ${e.message}`;
+		console.error(e);
+	} finally {
+		document.getElementById('bpLoadBtn').disabled = false;
+	}
+}
+
+async function bpFetchDataJson(key) {
+	const resp = await minioGet(key, 'bpMinioUrl');
+	const rawBuf = await resp.arrayBuffer();
+	try {
+		const ds = new DecompressionStream('gzip');
+		const reader = new Blob([rawBuf]).stream().pipeThrough(ds).getReader();
+		const chunks = [];
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			chunks.push(value);
+		}
+		const text = new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
+		return JSON.parse(text);
+	} catch {
+		const text = new TextDecoder().decode(rawBuf);
+		return JSON.parse(text);
+	}
+}
+
+async function bpFindDataJson(sessionId) {
+	try {
+		const xml = await minioList('', null, 'bpMinioUrl');
+		const allKeys = [...xml.querySelectorAll('Contents > Key')]
+			.map(k => k.textContent)
+			.filter(k => k.endsWith('data.json'));
+		for (const key of allKeys) {
+			if (key.includes(sessionId)) return await bpFetchDataJson(key);
+		}
+		for (const key of allKeys) {
+			try {
+				const dj = await bpFetchDataJson(key);
+				if (dj.session?.id === sessionId) return dj;
+			} catch { /* skip */ }
+		}
+	} catch { /* skip */ }
+	return null;
+}
+
+// ─── Frame rendering ────────────────────────────────────────────────────────
+
+// Find the last frame whose (time - firstFrameMs)/1000 <= targetSec.
+function bpFrameIndexAt(targetSec) {
+	if (bpFrames.length === 0) return -1;
+	const targetMs = targetSec * 1000 + bpFirstFrameMs;
+	let lo = 0, hi = bpFrames.length - 1, ans = 0;
+	while (lo <= hi) {
+		const mid = (lo + hi) >> 1;
+		if (bpFrames[mid].time <= targetMs) { ans = mid; lo = mid + 1; }
+		else hi = mid - 1;
+	}
+	return ans;
+}
+
+function bpRenderFrameAt(targetSec) {
+	const idx = bpFrameIndexAt(targetSec);
+	if (idx < 0) return;
+	if (idx !== bpCurrentFrameIdx) {
+		bpImage.src = bpFrames[idx].objectUrl;
+		bpCurrentFrameIdx = idx;
+	}
+	const frame = bpFrames[idx];
+	const framesAgoMs = targetSec * 1000 + bpFirstFrameMs - frame.time;
+	document.getElementById('bpFrameInfo').textContent =
+		`frame ${idx + 1}/${bpFrames.length} · t=${(frame.time/1000).toFixed(3)}s · ` +
+		`held ${framesAgoMs.toFixed(0)}ms · ${frame.width}x${frame.height} · ${frame.batch}`;
+}
+
+// ─── Playback (RAF loop paced by bin timestamps) ────────────────────────────
+
+function bpPlay() {
+	if (bpFrames.length === 0) return;
+	if (bpCurrentSec >= bpDurationSec) bpCurrentSec = 0;
+	bpPlaying = true;
+	bpLastTickMs = performance.now();
+	document.getElementById('bpPlayBtn').innerHTML = '&#9646;&#9646;';
+	bpStartLoop();
+}
+
+function bpPause() {
+	bpPlaying = false;
+	if (bpRafId) cancelAnimationFrame(bpRafId);
+	bpRafId = null;
+	document.getElementById('bpPlayBtn').innerHTML = '&#9654;';
+}
+
+function bpStartLoop() {
+	function tick(nowMs) {
+		if (!bpPlaying) return;
+		const dt = (nowMs - bpLastTickMs) / 1000;
+		bpLastTickMs = nowMs;
+		bpCurrentSec += dt * bpSpeed;
+
+		if (bpCurrentSec >= bpDurationSec) {
+			bpCurrentSec = bpDurationSec;
+			bpRenderFrameAt(bpCurrentSec);
+			bpUpdateOverlays();
+			bpPause();
+			return;
+		}
+
+		bpRenderFrameAt(bpCurrentSec);
+		bpUpdateOverlays();
+		bpRafId = requestAnimationFrame(tick);
+	}
+	bpRafId = requestAnimationFrame(tick);
+}
+
+function bpSeek(sec) {
+	bpCurrentSec = Math.max(0, Math.min(sec, bpDurationSec));
+	bpRenderFrameAt(bpCurrentSec);
+	bpUpdateOverlays();
+}
+
+// ─── Overlays (banner / clicks / event highlight / time / timeline) ─────────
+
+function bpUpdateOverlays() {
+	// Session time uses the first-frame anchor, same convention as the Player tab
+	const sessionTimeSec = bpCurrentSec + (bpFirstFrameMs / 1000);
+	bpUpdateScreenBanner(sessionTimeSec);
+	bpUpdateClickDots(sessionTimeSec);
+	bpUpdateActiveEvents(sessionTimeSec);
+	bpUpdateTimeDisplay();
+	bpUpdateTimelinePosition();
+}
+
+function bpUpdateTimeDisplay() {
+	document.getElementById('bpTimeDisplay').textContent =
+		`${formatTime(bpCurrentSec)} / ${formatTime(bpDurationSec)}`;
+}
+
+function bpUpdateTimelinePosition() {
+	if (bpDurationSec <= 0) return;
+	const pct = (bpCurrentSec / bpDurationSec) * 100;
+	document.getElementById('bpTimelineProgress').style.width = `${pct}%`;
+	document.getElementById('bpTimelineThumb').style.left = `${pct}%`;
+}
+
+function bpUpdateScreenBanner(timeSec) {
+	const banner = document.getElementById('bpBanner');
+	let current = null;
+	for (let i = bpScreenTimeline.length - 1; i >= 0; i--) {
+		if (bpScreenTimeline[i].at <= timeSec) { current = bpScreenTimeline[i]; break; }
+	}
+	banner.textContent = current ? current.an : 'No screen';
+}
+
+function bpUpdateClickDots(timeSec) {
+	document.querySelectorAll('#bpCanvasWrap .click-dot').forEach(d => d.remove());
+	document.querySelectorAll('#bpCanvasWrap .click-trail-svg').forEach(d => d.remove());
+	const wrap = document.getElementById('bpCanvasWrap');
+	const TRAIL_WINDOW = 3;
+	const allClicks = [];
+	for (const screen of bpScreenTimeline) {
+		if (!screen.cor) continue;
+		for (const click of screen.cor) {
+			const ct = click[5];
+			if (ct <= timeSec && ct >= timeSec - TRAIL_WINDOW) {
+				allClicks.push({ x: click[0], y: click[1], time: ct });
+			}
+		}
+	}
+	allClicks.sort((a, b) => a.time - b.time);
+	if (allClicks.length === 0) return;
+
+	const imgRect = bpImage.getBoundingClientRect();
+	const wrapRect = wrap.getBoundingClientRect();
+	const offsetX = imgRect.left - wrapRect.left;
+	const offsetY = imgRect.top - wrapRect.top;
+	const displayW = imgRect.width;
+	const displayH = imgRect.height;
+	const frameW = bpImage.naturalWidth || 1;
+	const frameH = bpImage.naturalHeight || 1;
+
+	function toScreen(cx, cy) {
+		return {
+			x: offsetX + (cx / frameW) * displayW,
+			y: offsetY + (cy / frameH) * displayH,
+		};
+	}
+
+	if (allClicks.length > 1) {
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.classList.add('click-trail-svg');
+		svg.setAttribute('width', '100%');
+		svg.setAttribute('height', '100%');
+		wrap.appendChild(svg);
+		for (let i = 1; i < allClicks.length; i++) {
+			const prev = toScreen(allClicks[i - 1].x, allClicks[i - 1].y);
+			const curr = toScreen(allClicks[i].x, allClicks[i].y);
+			const age = (timeSec - allClicks[i].time) / TRAIL_WINDOW;
+			const opacity = Math.max(0.1, 1 - age);
+			const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+			line.setAttribute('x1', prev.x);
+			line.setAttribute('y1', prev.y);
+			line.setAttribute('x2', curr.x);
+			line.setAttribute('y2', curr.y);
+			line.setAttribute('stroke', `rgba(255, 150, 80, ${opacity * 0.6})`);
+			line.setAttribute('stroke-width', '2');
+			line.setAttribute('stroke-dasharray', '4 3');
+			svg.appendChild(line);
+		}
+	}
+	for (let i = 0; i < allClicks.length; i++) {
+		const click = allClicks[i];
+		const age = timeSec - click.time;
+		const isCurrent = age < 0.3;
+		const pos = toScreen(click.x, click.y);
+		const dot = document.createElement('div');
+		dot.className = `click-dot ${isCurrent ? 'current' : 'trail'}`;
+		if (!isCurrent) dot.style.opacity = Math.max(0.15, 1 - (age / TRAIL_WINDOW));
+		dot.style.left = `${pos.x}px`;
+		dot.style.top = `${pos.y}px`;
+		wrap.appendChild(dot);
+	}
+}
+
+function bpUpdateActiveEvents(timeSec) {
+	const sorted = bpEvents.slice().sort((a, b) => a.time - b.time);
+	sorted.forEach((evt, i) => {
+		const el = document.getElementById(`bp-evt-${i}`);
+		if (!el) return;
+		const diff = Math.abs(timeSec - evt.time);
+		if (diff < 0.2) {
+			el.classList.add('active');
+			el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		} else {
+			el.classList.remove('active');
+		}
+	});
+}
+
+// ─── Sidebar + timeline build ───────────────────────────────────────────────
+
+function bpBuildEventLog() {
+	const log = document.getElementById('bpEventLog');
+	log.innerHTML = '';
+	const sorted = bpEvents.slice().sort((a, b) => a.time - b.time);
+	sorted.forEach((evt, i) => {
+		const div = document.createElement('div');
+		div.className = 'event-item';
+		div.id = `bp-evt-${i}`;
+		div.innerHTML = `
+			<span class="time">${formatTime(evt.time)}</span>
+			<span class="name ${evt.internal ? 'internal' : ''}">${escapeHtml(evt.name)}</span>
+			<span class="screen">${escapeHtml(evt.screen || '')}</span>
+		`;
+		div.addEventListener('click', () => bpSeek(evt.time - (bpFirstFrameMs / 1000)));
+		log.appendChild(div);
+	});
+}
+
+function bpBuildTimeline() {
+	const wrap = document.getElementById('bpTimelineWrap');
+	wrap.querySelectorAll('.timeline-marker').forEach(m => m.remove());
+	if (bpDurationSec <= 0) return;
+
+	const offsetSec = bpFirstFrameMs / 1000;
+	bpEvents.forEach(evt => {
+		const t = evt.time - offsetSec;
+		if (t < 0 || t > bpDurationSec) return;
+		const pct = (t / bpDurationSec) * 100;
+		const m = document.createElement('div');
+		m.className = 'timeline-marker';
+		m.style.left = `${pct}%`;
+		m.setAttribute('data-label', `${evt.name} @${evt.time.toFixed(1)}s`);
+		wrap.appendChild(m);
+	});
+	bpScreenTimeline.forEach(s => {
+		const t = s.at - offsetSec;
+		if (t < 0 || t > bpDurationSec) return;
+		const pct = (t / bpDurationSec) * 100;
+		const m = document.createElement('div');
+		m.className = 'timeline-marker screen-marker';
+		m.style.left = `${pct}%`;
+		m.setAttribute('data-label', s.an);
+		wrap.appendChild(m);
+	});
+}
+
+// ─── Controls ───────────────────────────────────────────────────────────────
+
+document.getElementById('bpPlayBtn').addEventListener('click', () => {
+	bpPlaying ? bpPause() : bpPlay();
+});
+
+document.querySelectorAll('.bp-speed').forEach(el => {
+	el.addEventListener('click', () => {
+		document.querySelectorAll('.bp-speed').forEach(s => s.classList.remove('active'));
+		el.classList.add('active');
+		bpSpeed = parseFloat(el.dataset.speed);
+	});
+});
+
+document.getElementById('bpTimelineWrap').addEventListener('click', (e) => {
+	if (bpDurationSec <= 0) return;
+	const rect = e.currentTarget.getBoundingClientRect();
+	const pct = (e.clientX - rect.left) / rect.width;
+	bpSeek(pct * bpDurationSec);
+});
+
+{
+	const wrap = document.getElementById('bpTimelineWrap');
+	let dragging = false;
+	wrap.addEventListener('mousedown', (e) => {
+		dragging = true;
+		const rect = wrap.getBoundingClientRect();
+		const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		bpSeek(pct * bpDurationSec);
+	});
+	document.addEventListener('mousemove', (e) => {
+		if (!dragging) return;
+		const rect = wrap.getBoundingClientRect();
+		const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		bpSeek(pct * bpDurationSec);
 	});
 	document.addEventListener('mouseup', () => { dragging = false; });
 }

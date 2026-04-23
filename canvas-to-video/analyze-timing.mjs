@@ -156,19 +156,40 @@ async function loadBatchesFromServer({ sessionId, server, minio }) {
 
 function extractFrames(batchBuffers) {
 	const allFrames = []
+	const startTimesByBin = new Map()
 	for (const { name, buffer } of batchBuffers) {
 		try {
 			const raw = tryGunzip(buffer)
 			const { frames } = parseBatch(raw)
 			for (const f of frames) {
-				allFrames.push({ time: f.time, width: f.width, height: f.height, bytes: f.data.length, batch: name })
+				allFrames.push({ time: f.time, width: f.width, height: f.height, bytes: f.data.length, batch: name, startTime: f.startTime })
 			}
+			const firstStart = frames[0]?.startTime
+			if (typeof firstStart === 'number') startTimesByBin.set(name, firstStart)
 		} catch (err) {
 			console.error(`[analyze] skip ${name}: ${err.message}`)
 		}
 	}
 	allFrames.sort((a, b) => a.time - b.time)
+	reportStartTimes(startTimesByBin)
 	return allFrames
+}
+
+function reportStartTimes(startTimesByBin) {
+	if (startTimesByBin.size === 0) {
+		console.log('[analyze] no startTime (s) field in any bin — running on legacy format')
+		return
+	}
+	const uniques = new Set(startTimesByBin.values())
+	if (uniques.size === 1) {
+		const [s] = uniques
+		console.log(`[analyze] startTime consistent across ${startTimesByBin.size} bin(s): ${s} (${new Date(s).toISOString()})`)
+		return
+	}
+	console.error(`[analyze] ⚠ ${uniques.size} different startTimes across bins — timestamps will NOT align:`)
+	for (const [name, s] of startTimesByBin) {
+		console.error(`    ${name}: s=${s} (${new Date(s).toISOString()})`)
+	}
 }
 
 function tryGunzip(buffer) {

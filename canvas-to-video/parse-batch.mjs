@@ -50,7 +50,7 @@ function parseBatchBinaryAuto(buffer) {
 
 /**
  * V2: [4-byte gzipped JSON len][gzipped JSON metadata][raw WebP blobs]
- * JSON: [{ t, sz, w, h }, ...]
+ * JSON: [{ t, sz, w, h, s? }, ...] — `s` is optional session startTime (epoch ms)
  * Sequential cursor-based unpacking using `sz`.
  */
 function parseBatchBinaryV2(buffer, gzippedJsonLen) {
@@ -69,6 +69,7 @@ function parseBatchBinaryV2(buffer, gzippedJsonLen) {
 			width: f.w,
 			height: f.h,
 			data: Buffer.from(frameData),
+			startTime: f.s,
 		}
 	})
 

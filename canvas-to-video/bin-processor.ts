@@ -162,7 +162,9 @@ export function BinProcessingService(
  *
  * Wire format (produced by packBatch):
  *   [4-byte gzipped-JSON len (big-endian)][gzipped JSON metadata][raw WebP blobs]
- *   JSON: [{ t, sz, w, h }, ...]
+ *   JSON: [{ t, sz, w, h, s }, ...]
+ *     s = session start epoch (ms). Redundant per-frame so any bin can self-anchor,
+ *         even when earlier bins are missing.
  *
  * The .bin files stored in S3 may be gzipped at the outer level,
  * so we attempt outer decompression first before parsing the inner binary format.
@@ -170,6 +172,8 @@ export function BinProcessingService(
 function parseBatchBuffers(batchBuffers: BatchBuffer[]): ParsedFrame[] {
   const allFrames: ParsedFrame[] = []
   const log = createLogger('parseBatchBuffers')
+  const startTimesSeen = new Set<number>()
+
   for (const { name, buffer } of batchBuffers) {
     log.info({ name, bufferSize: buffer.length }, 'Processing bin file')
 
@@ -180,7 +184,7 @@ function parseBatchBuffers(batchBuffers: BatchBuffer[]): ParsedFrame[] {
       const gzippedJsonLen = raw.readUInt32BE(0)
       const gzippedJson = raw.subarray(4, 4 + gzippedJsonLen)
       const jsonBytes = gunzipSync(gzippedJson)
-      const meta: Array<{ t: number; sz: number; w: number; h: number }> = JSON.parse(new TextDecoder().decode(jsonBytes))
+      const meta: Array<{ t: number; sz: number; w: number; h: number; s?: number }> = JSON.parse(new TextDecoder().decode(jsonBytes))
 
       const dataStart = 4 + gzippedJsonLen
       let cursor = 0
@@ -189,15 +193,23 @@ function parseBatchBuffers(batchBuffers: BatchBuffer[]): ParsedFrame[] {
         const frameData = raw.subarray(dataStart + cursor, dataStart + cursor + f.sz)
         cursor += f.sz
         allFrames.push({ time: f.t, width: f.w, height: f.h, data: Buffer.from(frameData) })
+        if (typeof f.s === 'number' && f.s > 0) startTimesSeen.add(f.s)
       }
 
-      log.info({ name, framesExtracted: meta.length }, 'Parsed batch buffer')
+      const firstT = meta[0]?.t
+      const lastT = meta[meta.length - 1]?.t
+      const startTime = meta[0]?.s
+      log.info({ name, framesExtracted: meta.length, firstT, lastT, startTime }, 'Parsed batch buffer')
     } catch (err) {
       log.warn({ name, error: (err as Error).message }, 'Failed to parse batch buffer, skipping')
     }
   }
 
-  log.info({ totalFrames: allFrames.length, totalFiles: batchBuffers.length }, 'Finished parsing all batch buffers')
+  if (startTimesSeen.size > 1) {
+    log.warn({ startTimes: [...startTimesSeen] }, 'Multiple session startTimes observed across bins — timestamps may be misaligned; video pacing will be wrong')
+  }
+
+  log.info({ totalFrames: allFrames.length, totalFiles: batchBuffers.length, uniqueStartTimes: startTimesSeen.size }, 'Finished parsing all batch buffers')
   return allFrames
 }
 
@@ -330,8 +342,15 @@ function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: st
       'libx265',
       '-pix_fmt',
       'yuv420p',
-      '-vsync',
-      'vfr',
+      // fps_mode=passthrough preserves per-frame durations from the concat
+      // demuxer exactly. -vsync vfr (legacy) rounds durations to the output
+      // timebase and can compress time at high capture rates.
+      '-fps_mode',
+      'passthrough',
+      // Output timebase at 1ms granularity so 33ms frame durations (30 fps
+      // capture) survive without rounding.
+      '-video_track_timescale',
+      '1000',
       '-crf',
       '28',
       '-preset',

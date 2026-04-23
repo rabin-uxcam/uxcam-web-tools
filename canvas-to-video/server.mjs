@@ -19,6 +19,7 @@ import { createServer } from 'node:http'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, extname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gunzipSync } from 'node:zlib'
 import {
 	createS3Client,
 	listBatchFiles,
@@ -27,6 +28,7 @@ import {
 	getAllStrategies,
 } from './index.mjs'
 import { processBin } from './bin-processor.mjs'
+import { parseBatch } from './parse-batch.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const PORT = parseInt(process.env.PORT || '5505', 10)
@@ -294,6 +296,85 @@ async function handleConvertBin(req, res) {
 	}
 }
 
+// ─── POST /bin-frames — decode bin frames with their raw timestamps ─────────
+//
+// Returns every frame decoded from the session's .bin files, each with its
+// original timestamp from the bin metadata (NOT a video-timeline approximation).
+// The browser plays these as an <img> slideshow scheduled on the raw timestamps,
+// so drift between the bin timestamps and the ffmpeg-encoded video can be
+// measured side-by-side.
+
+function tryOuterGunzip(buffer) {
+	try {
+		return gunzipSync(buffer)
+	} catch {
+		return buffer
+	}
+}
+
+async function handleBinFrames(req, res) {
+	let body = ''
+	for await (const chunk of req) body += chunk
+
+	let params
+	try {
+		params = JSON.parse(body)
+	} catch {
+		return sendJson(res, 400, { error: 'Invalid JSON body' })
+	}
+
+	const { sessionId } = params
+	if (!sessionId) {
+		return sendJson(res, 400, { error: 'sessionId is required' })
+	}
+
+	console.log(`[bin-frames] Session: ${sessionId}`)
+
+	try {
+		const batchBuffers = await downloadBatchFiles(params)
+		if (!batchBuffers) {
+			return sendJson(res, 404, { error: 'No batch files found for this session' })
+		}
+
+		const frames = []
+		for (const { name, buffer } of batchBuffers) {
+			try {
+				const raw = tryOuterGunzip(buffer)
+				const { frames: batchFrames } = parseBatch(raw)
+				for (const f of batchFrames) {
+					frames.push({
+						batch: name,
+						time: f.time,
+						width: f.width,
+						height: f.height,
+						dataBase64: Buffer.from(f.data).toString('base64'),
+					})
+				}
+			} catch (err) {
+				console.warn(`[bin-frames] Failed to parse ${name}: ${err.message}`)
+			}
+		}
+
+		if (frames.length === 0) {
+			return sendJson(res, 500, { error: 'No frames decoded from batches' })
+		}
+
+		frames.sort((a, b) => a.time - b.time)
+
+		console.log(`[bin-frames] Decoded ${frames.length} frames across ${batchBuffers.length} batch(es)`)
+		sendJson(res, 200, {
+			frameCount: frames.length,
+			batchCount: batchBuffers.length,
+			firstTimeMs: frames[0].time,
+			lastTimeMs: frames[frames.length - 1].time,
+			frames,
+		})
+	} catch (err) {
+		console.error('[bin-frames] Error:', err)
+		sendJson(res, 500, { error: err.message })
+	}
+}
+
 // ─── GET /minio/* — proxy to MinIO ─────────────────────────────────────────
 
 async function handleMinioProxy(req, res) {
@@ -364,6 +445,11 @@ const server = createServer(async (req, res) => {
 			return await handleConvertBin(req, res)
 		}
 
+		// POST /bin-frames — decode raw bin frames for timestamp-driven playback
+		if (req.method === 'POST' && url.pathname === '/bin-frames') {
+			return await handleBinFrames(req, res)
+		}
+
 		// GET /minio/* — proxy to MinIO
 		if (url.pathname.startsWith('/minio/')) {
 			return await handleMinioProxy(req, res)
@@ -425,6 +511,7 @@ server.listen(PORT, () => {
 	console.log(`  Convert:    POST http://localhost:${PORT}/convert`)
 	console.log(`  Benchmark:  POST http://localhost:${PORT}/benchmark`)
 	console.log(`  Bin-proc:   POST http://localhost:${PORT}/convert-bin`)
+	console.log(`  Bin-frames: POST http://localhost:${PORT}/bin-frames`)
 	console.log(`  MinIO proxy: http://localhost:${PORT}/minio/<host>/<path>`)
 	console.log()
 })
