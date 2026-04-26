@@ -52,9 +52,27 @@ export function BinProcessingService(
     const log = logger.child({ orgId, appId, sessionId })
 
     // a) Parse batch buffers → frames
-    const allFrames = parseBatchBuffers(batchBuffers)
-    if (allFrames.length === 0) {
+    const allParsed = parseBatchBuffers(batchBuffers)
+    if (allParsed.length === 0) {
       log.info('No frames found in batch buffers, returning')
+      return
+    }
+
+    // Separate end-marker frames (sz=0, w=0, h=0) from real video frames.
+    // End markers carry the session-close timestamp for accurate duration.
+    const allFrames: ParsedFrame[] = []
+    let endMarkerTime: number | null = null
+    for (const f of allParsed) {
+      if (f.data.length === 0 && f.width === 0 && f.height === 0) {
+        endMarkerTime = f.time
+        log.info({ endMarkerTime }, 'Found session end marker')
+      } else {
+        allFrames.push(f)
+      }
+    }
+
+    if (allFrames.length === 0) {
+      log.info('No video frames found (only end markers), returning')
       return
     }
 
@@ -76,8 +94,15 @@ export function BinProcessingService(
       await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
 
       // f) Build concat.txt
+      // If an end marker exists, compute the hold time for the last frame from it.
+      let lastFrameHoldMs = LAST_FRAME_HOLD_MS
+      if (endMarkerTime !== null) {
+        const lastFrameTime = allFrames[allFrames.length - 1].time
+        const gap = endMarkerTime - lastFrameTime
+        if (gap > 0) lastFrameHoldMs = gap
+      }
       const concatPath = join(workDir, 'concat.txt')
-      writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes), 'utf-8')
+      writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes, lastFrameHoldMs), 'utf-8')
 
       // g) FFmpeg encode
       const outputVideo = join(workDir, `${sessionId}.mp4`)
@@ -300,11 +325,11 @@ async function writeFrames(allFrames: ParsedFrame[], workDir: string, maxW: numb
   }
 }
 
-function buildConcatFile(frameCount: number, workDir: string, effectiveTimes: number[]): string {
+function buildConcatFile(frameCount: number, workDir: string, effectiveTimes: number[], lastFrameHoldMs = LAST_FRAME_HOLD_MS): string {
   const lines = ['ffconcat version 1.0']
 
   for (let i = 0; i < frameCount; i++) {
-    const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : LAST_FRAME_HOLD_MS / 1000
+    const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : lastFrameHoldMs / 1000
 
     lines.push(`file ${join(workDir, `src-${String(i).padStart(5, '0')}.webp`)}`)
     lines.push(`duration ${durationSec.toFixed(6)}`)

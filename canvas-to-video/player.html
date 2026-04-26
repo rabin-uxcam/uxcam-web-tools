@@ -76,6 +76,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .timeline-marker:hover::after { content: attr(data-label); position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 10px; white-space: nowrap; z-index: 10; }
 .timeline-marker.screen-marker:hover::after { bottom: auto; top: 12px; }
 
+/* Duration info bar */
+.duration-bar { display: none; padding: 8px 16px; background: #16213e; border-bottom: 1px solid #0f3460; font-size: 12px; gap: 16px; flex-wrap: wrap; align-items: center; }
+.duration-bar.visible { display: flex; }
+.duration-bar .dur-item { display: flex; align-items: center; gap: 6px; }
+.duration-bar .dur-label { color: #888; }
+.duration-bar .dur-value { color: #e0e0e0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.duration-bar .dur-diff { padding: 2px 8px; border-radius: 3px; font-weight: 600; }
+.duration-bar .dur-diff.match { background: rgba(46, 204, 113, 0.15); color: #2ecc71; }
+.duration-bar .dur-diff.close { background: rgba(241, 196, 15, 0.15); color: #f1c40f; }
+.duration-bar .dur-diff.off { background: rgba(231, 76, 60, 0.15); color: #e74c3c; }
+.duration-bar .dur-sep { color: #333; margin: 0 4px; }
+
 /* Loading overlay */
 .loading { position: absolute; inset: 0; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }
 .loading.hidden { display: none; }
@@ -203,6 +215,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 	<select id="binDataSelect"><option value="">-- click List --</option></select>
 	<button id="binLoadBtn" disabled>Convert &amp; Play</button>
 	<span class="status" id="binStatus"></span>
+</div>
+
+<div class="duration-bar" id="binDurationBar">
+	<div class="dur-item"><span class="dur-label">data.json:</span> <span class="dur-value" id="durDataJson">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">Video:</span> <span class="dur-value" id="durVideo">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">Expected (concat):</span> <span class="dur-value" id="durExpected">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">End Marker:</span> <span class="dur-value" id="durEndMarker">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">Frame span:</span> <span class="dur-value" id="durFrameSpan">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">Last hold:</span> <span class="dur-value" id="durLastHold">—</span></div>
+	<span class="dur-sep">|</span>
+	<div class="dur-item"><span class="dur-label">data.json vs Video:</span> <span class="dur-diff" id="durDiff">—</span></div>
 </div>
 
 <div class="main">
@@ -1087,10 +1115,12 @@ async function binLoadSession() {
 		if (binTotalTimeMs <= 0) binTotalTimeMs = (binVideo.duration || 0) * 1000;
 
 		binSetupPlayer();
+		binUpdateDurationBar(data.timing, binTotalTimeMs, binVideo.duration);
 		loadingEl.classList.add('hidden');
 	} catch (e) {
 		loadingEl.classList.add('hidden');
 		document.getElementById('binStatus').textContent = `Error: ${e.message}`;
+		document.getElementById('binDurationBar').classList.remove('visible');
 		console.error(e);
 	} finally {
 		document.getElementById('binLoadBtn').disabled = false;
@@ -1140,6 +1170,74 @@ async function binFindDataJson(sessionId) {
 		}
 	} catch { /* skip */ }
 	return null;
+}
+
+// ─── Duration comparison bar ─────────────────────────────────────────────────
+
+function binUpdateDurationBar(timing, dataJsonDurationMs, videoDurationSec) {
+	const bar = document.getElementById('binDurationBar');
+	const videoDurationMs = (videoDurationSec || 0) * 1000;
+
+	// data.json duration
+	const djEl = document.getElementById('durDataJson');
+	if (dataJsonDurationMs > 0) {
+		djEl.textContent = `${(dataJsonDurationMs / 1000).toFixed(2)}s`;
+	} else {
+		djEl.textContent = 'N/A';
+	}
+
+	// Actual video duration (from mp4 metadata)
+	document.getElementById('durVideo').textContent = `${(videoDurationMs / 1000).toFixed(2)}s`;
+
+	if (timing) {
+		// Expected video duration (from concat timeline)
+		document.getElementById('durExpected').textContent = `${(timing.expectedVideoDurationMs / 1000).toFixed(2)}s`;
+
+		// End marker
+		const emEl = document.getElementById('durEndMarker');
+		if (timing.endMarkerTime !== null) {
+			const spanMs = timing.endMarkerTime - timing.firstFrameTime;
+			emEl.textContent = `${(spanMs / 1000).toFixed(2)}s from first frame`;
+		} else {
+			emEl.textContent = 'not found';
+			emEl.style.color = '#e74c3c';
+		}
+
+		// Frame span (last - first)
+		const frameSpanMs = timing.lastFrameTime - timing.firstFrameTime;
+		document.getElementById('durFrameSpan').textContent = `${(frameSpanMs / 1000).toFixed(2)}s`;
+
+		// Last frame hold
+		document.getElementById('durLastHold').textContent = `${(timing.lastFrameHoldMs / 1000).toFixed(2)}s`;
+	} else {
+		document.getElementById('durExpected').textContent = '—';
+		document.getElementById('durEndMarker').textContent = '—';
+		document.getElementById('durFrameSpan').textContent = '—';
+		document.getElementById('durLastHold').textContent = '—';
+	}
+
+	// Diff: data.json vs actual video
+	const diffEl = document.getElementById('durDiff');
+	if (dataJsonDurationMs > 0 && videoDurationMs > 0) {
+		const diffMs = dataJsonDurationMs - videoDurationMs;
+		const absDiff = Math.abs(diffMs);
+		const sign = diffMs >= 0 ? '+' : '';
+		diffEl.textContent = `${sign}${(diffMs / 1000).toFixed(2)}s (${sign}${absDiff.toFixed(0)}ms)`;
+
+		diffEl.classList.remove('match', 'close', 'off');
+		if (absDiff < 100) {
+			diffEl.classList.add('match');
+		} else if (absDiff < 1000) {
+			diffEl.classList.add('close');
+		} else {
+			diffEl.classList.add('off');
+		}
+	} else {
+		diffEl.textContent = 'N/A';
+		diffEl.classList.remove('match', 'close', 'off');
+	}
+
+	bar.classList.add('visible');
 }
 
 // ─── Player setup ────────────────────────────────────────────────────────────

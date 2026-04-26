@@ -287,6 +287,7 @@ async function handleConvertBin(req, res) {
 			frameCount: result.frameCount,
 			videoSizeBytes: result.videoSizeBytes,
 			dimensions: result.dimensions,
+			timing: result.timing,
 		})
 	} catch (err) {
 		console.error('[convert-bin] Error:', err)

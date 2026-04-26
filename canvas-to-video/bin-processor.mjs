@@ -36,9 +36,27 @@ const LAST_FRAME_HOLD_MS = 500
  */
 export async function processBin(batchBuffers, sessionId, outputDir) {
 	// a) Parse batch buffers → frames
-	const allFrames = parseBatchBuffers(batchBuffers)
-	if (allFrames.length === 0) {
+	const allParsed = parseBatchBuffers(batchBuffers)
+	if (allParsed.length === 0) {
 		console.log('[bin-processor] No frames found in batch buffers, returning')
+		return null
+	}
+
+	// Separate end-marker frames (sz=0, w=0, h=0) from real video frames.
+	// End markers carry the session-close timestamp for accurate duration.
+	const allFrames = []
+	let endMarkerTime = null
+	for (const f of allParsed) {
+		if (f.data.length === 0 && f.width === 0 && f.height === 0) {
+			endMarkerTime = f.time
+			console.log(`[bin-processor] Found session end marker at t=${endMarkerTime}`)
+		} else {
+			allFrames.push(f)
+		}
+	}
+
+	if (allFrames.length === 0) {
+		console.log('[bin-processor] No video frames found (only end markers), returning')
 		return null
 	}
 
@@ -60,8 +78,15 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 		await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
 
 		// f) Build concat.txt
+		// If end marker exists, extend last frame hold to match true session end.
+		let lastFrameHoldMs = LAST_FRAME_HOLD_MS
+		if (endMarkerTime !== null) {
+			const lastFrameTime = allFrames[allFrames.length - 1].time
+			const gap = endMarkerTime - lastFrameTime
+			if (gap > 0) lastFrameHoldMs = gap
+		}
 		const concatPath = join(workDir, 'concat.txt')
-		writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes), 'utf-8')
+		writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes, lastFrameHoldMs), 'utf-8')
 
 		// g) FFmpeg encode
 		const outputVideo = join(outputDir, `${sessionId}-bin`, `${sessionId}.mp4`)
@@ -71,11 +96,22 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 
 		const videoSizeBytes = statSync(outputVideo).size
 
+		// Compute expected video duration from the concat timeline
+		const lastEffective = effectiveTimes[effectiveTimes.length - 1] || 0
+		const expectedVideoDurationMs = lastEffective + lastFrameHoldMs
+
 		return {
 			videoPath: outputVideo,
 			frameCount: allFrames.length,
 			videoSizeBytes,
 			dimensions: { width: maxW, height: maxH, hasVaryingSizes },
+			timing: {
+				firstFrameTime: allFrames[0].time,
+				lastFrameTime: allFrames[allFrames.length - 1].time,
+				endMarkerTime,
+				lastFrameHoldMs,
+				expectedVideoDurationMs,
+			},
 		}
 	} finally {
 		// h) Cleanup frames (keep the .mp4)
@@ -238,11 +274,11 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 
 // ─── Concat file (mirrors bin-processor.ts buildConcatFile) ──────────────────
 
-function buildConcatFile(frameCount, workDir, effectiveTimes) {
+function buildConcatFile(frameCount, workDir, effectiveTimes, lastFrameHoldMs = LAST_FRAME_HOLD_MS) {
 	const lines = ['ffconcat version 1.0']
 
 	for (let i = 0; i < frameCount; i++) {
-		const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : LAST_FRAME_HOLD_MS / 1000
+		const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : lastFrameHoldMs / 1000
 
 		lines.push(`file ${join(workDir, `src-${String(i).padStart(5, '0')}.webp`)}`)
 		lines.push(`duration ${durationSec.toFixed(6)}`)
