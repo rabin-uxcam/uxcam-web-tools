@@ -20,7 +20,6 @@ import { parseBatch } from './parse-batch.mjs'
 
 // ─── Constants (matching bin-processor.ts) ────────────────────────────────────
 
-const LAST_FRAME_HOLD_MS = 500
 const FRAME_QUALITY = 80
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -38,14 +37,20 @@ const FRAME_QUALITY = 80
  */
 export async function processBin(batchBuffers, sessionId, outputDir) {
 	// a) Parse batch buffers → frames
-	const allFrames = parseBatchBuffers(batchBuffers)
-	if (allFrames.length === 0) {
+	const parsedFrames = parseBatchBuffers(batchBuffers)
+	if (parsedFrames.length === 0) {
 		console.log('[bin-processor] No frames found in batch buffers, returning')
 		return null
 	}
 
-	// b) Sort frames by timestamp
-	allFrames.sort((a, b) => a.time - b.time)
+	// b) Sort by timestamp, then split out end-markers (sz=0 sentinel frames)
+	parsedFrames.sort((a, b) => a.time - b.time)
+	const { allFrames, endMarkerTime } = extractEndMarker(parsedFrames)
+
+	if (allFrames.length === 0) {
+		console.log('[bin-processor] Only end markers found (no real frames), returning')
+		return null
+	}
 
 	// c) Resolve dimensions
 	const { maxW, maxH, hasVaryingSizes } = await resolveDimensions(allFrames)
@@ -61,9 +66,10 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 	try {
 		await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
 
-		// f) Build concat.txt
+		// f) Build concat.txt — use end-marker to hold the last frame until session end
+		const lastFrameHoldMs = computeLastFrameHoldMs(allFrames, endMarkerTime)
 		const concatPath = join(workDir, 'concat.txt')
-		writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes), 'utf-8')
+		writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes, lastFrameHoldMs), 'utf-8')
 
 		// g) FFmpeg encode
 		const outputVideo = join(outputDir, `${sessionId}-bin`, `${sessionId}.mp4`)
@@ -130,6 +136,56 @@ function decompressBuffer(buffer) {
 	} catch {
 		return buffer
 	}
+}
+
+// ─── End-marker handling ─────────────────────────────────────────────────────
+
+/**
+ * Frontend (FlutterCanvasManager.buildEndMarker) emits a single FrameData with
+ * data.byteLength === 0, w=0, h=0, t=endTime as a session-close sentinel.
+ * The page-unload path can fire more than once (visibilitychange + pagehide,
+ * or double pagehide on bfcache restore), so we may receive multiple markers.
+ *
+ * Returns the real frames (markers stripped) and the latest marker timestamp,
+ * which represents the most accurate session-end time. Null if no markers.
+ */
+function extractEndMarker(frames) {
+	const realFrames = []
+	let endMarkerTime = null
+	let markerCount = 0
+
+	for (const f of frames) {
+		if (f.data.length === 0) {
+			markerCount++
+			if (endMarkerTime === null || f.time > endMarkerTime) {
+				endMarkerTime = f.time
+			}
+		} else {
+			realFrames.push(f)
+		}
+	}
+
+	if (markerCount > 0) {
+		console.log(`[bin-processor] Found ${markerCount} end-marker(s); using t=${endMarkerTime} as session end`)
+	}
+
+	return { allFrames: realFrames, endMarkerTime }
+}
+
+/**
+ * Hold the last real frame until the session-end timestamp from the marker.
+ * The marker is optional — older sessions and crashed/force-quit sessions
+ * may not produce one. When absent or stale, fall back to a short constant
+ * so FFmpeg gets a non-zero duration for the final frame.
+ */
+function computeLastFrameHoldMs(allFrames, endMarkerTime) {
+	if (endMarkerTime !== null) {
+		const lastFrameTime = allFrames[allFrames.length - 1].time
+		const holdMs = endMarkerTime - lastFrameTime
+		if (holdMs > 0) return holdMs
+		console.warn(`[bin-processor] End-marker (${endMarkerTime}) not after last frame (${lastFrameTime}) — using fallback`)
+	}
+	return 50
 }
 
 // ─── Dimension resolution (mirrors bin-processor.ts resolveDimensions) ───────
@@ -223,11 +279,11 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 
 // ─── Concat file (mirrors bin-processor.ts buildConcatFile) ──────────────────
 
-function buildConcatFile(frameCount, workDir, effectiveTimes) {
+function buildConcatFile(frameCount, workDir, effectiveTimes, lastFrameHoldMs) {
 	const lines = ['ffconcat version 1.0']
 
 	for (let i = 0; i < frameCount; i++) {
-		const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : LAST_FRAME_HOLD_MS / 1000
+		const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : lastFrameHoldMs / 1000
 
 		lines.push(`file ${join(workDir, `src-${String(i).padStart(5, '0')}.webp`)}`)
 		lines.push(`duration ${durationSec.toFixed(6)}`)
