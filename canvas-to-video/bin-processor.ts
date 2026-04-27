@@ -66,8 +66,8 @@ export function BinProcessingService(
     allFrames.sort((a, b) => a.time - b.time)
 
     // c) Resolve dimensions
-    const { maxW, maxH, hasVaryingSizes } = await resolveDimensions(allFrames)
-    log.info({ frameCount: allFrames.length, maxW, maxH, hasVaryingSizes }, 'Resolved frame dimensions')
+    const { maxW, maxH } = await resolveDimensions(allFrames)
+    log.info({ frameCount: allFrames.length, maxW, maxH }, 'Resolved frame dimensions')
 
     // d) Build effective timeline (gap capping)
     const effectiveTimes = buildEffectiveTimeline(allFrames)
@@ -78,7 +78,7 @@ export function BinProcessingService(
 
     try {
       log.info({ frameQuality: FRAME_QUALITY }, 'Writing frames to disk with quality setting')
-      await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
+      await writeFrames(allFrames, workDir)
 
       // f) Build concat.txt
       const concatPath = join(workDir, 'concat.txt')
@@ -87,7 +87,7 @@ export function BinProcessingService(
       // g) FFmpeg encode
       const outputVideo = join(workDir, `${sessionId}.mp4`)
       log.info('Starting FFmpeg encode')
-      await runFfmpeg(ffmpegBinaryPath, concatPath, outputVideo)
+      await runFfmpeg(ffmpegBinaryPath, concatPath, outputVideo, maxW, maxH)
       log.info('FFmpeg encode complete')
 
       // h) Upload to S3
@@ -216,7 +216,7 @@ function decompressBuffer(buffer: Buffer): Buffer {
   }
 }
 
-async function resolveDimensions(allFrames: ParsedFrame[]): Promise<{ maxW: number; maxH: number; hasVaryingSizes: boolean }> {
+async function resolveDimensions(allFrames: ParsedFrame[]): Promise<{ maxW: number; maxH: number }> {
   // Backfill missing dimensions from first frame's WebP metadata
   if (allFrames.some((f) => f.width === 0 || f.height === 0)) {
     const meta = await sharp(allFrames[0].data).metadata()
@@ -239,9 +239,7 @@ async function resolveDimensions(allFrames: ParsedFrame[]): Promise<{ maxW: numb
   if (maxW % 2 !== 0) maxW++
   if (maxH % 2 !== 0) maxH++
 
-  const hasVaryingSizes = allFrames.some((f) => f.width !== allFrames[0].width || f.height !== allFrames[0].height)
-
-  return { maxW, maxH, hasVaryingSizes }
+  return { maxW, maxH }
 }
 
 function buildEffectiveTimeline(allFrames: ParsedFrame[]): number[] {
@@ -252,42 +250,10 @@ function buildEffectiveTimeline(allFrames: ParsedFrame[]): number[] {
   return effectiveTimes
 }
 
-async function writeFrames(allFrames: ParsedFrame[], workDir: string, maxW: number, maxH: number, hasVaryingSizes: boolean): Promise<void> {
-  // Resize when sizes vary OR when any source frame has odd dimensions
-  // (maxW/maxH are already rounded to even by resolveDimensions)
-  const needsResize = hasVaryingSizes || allFrames.some((f) => f.width % 2 !== 0 || f.height % 2 !== 0)
-
-  // Cache filler background — same for every padded frame, no need to regenerate
-  let cachedFillerBg: Buffer | null = null
-
+async function writeFrames(allFrames: ParsedFrame[], workDir: string): Promise<void> {
   for (let i = 0; i < allFrames.length; i++) {
     const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
-
-    if (needsResize) {
-      const frame = allFrames[i]
-      const padBottom = Math.max(0, maxH - frame.height)
-      const padRight = Math.max(0, maxW - frame.width)
-
-      if (padBottom > 0 || padRight > 0) {
-        if (!cachedFillerBg) {
-          cachedFillerBg = await sharp({
-            create: { width: maxW, height: maxH, channels: 3, background: { r: 193, g: 195, b: 197 } },
-          })
-            .webp()
-            .toBuffer()
-        }
-
-        await sharp(cachedFillerBg)
-          .composite([{ input: frame.data, top: 0, left: 0 }])
-          .webp({ quality: FRAME_QUALITY })
-          .toFile(framePath)
-      } else {
-        // Frame matches max dimensions but may have odd dimensions — just re-encode
-        await sharp(frame.data).webp({ quality: FRAME_QUALITY }).toFile(framePath)
-      }
-    } else {
-      writeFileSync(framePath, allFrames[i].data)
-    }
+    writeFileSync(framePath, allFrames[i].data)
 
     // Release frame buffer after writing — reduces memory for long sessions
     allFrames[i].data = Buffer.alloc(0)
@@ -310,7 +276,7 @@ function buildConcatFile(frameCount: number, workDir: string, effectiveTimes: nu
   return lines.join('\n')
 }
 
-function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: string): Promise<void> {
+function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: string, maxW: number, maxH: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const args = [
        '-y',
@@ -324,18 +290,18 @@ function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: st
       concatPath,
       '-c:v',
       'libx264',
-      '-pix_fmt',
-      'yuv420p',
+      '-vf',
+      `pad=${maxW}:${maxH}:0:0:color=0xC1C3C5,format=yuv420p`,
       '-vsync',
       'vfr',
       '-crf',
-      '28',
+      '32',
       '-preset',
-      'fast',
+      'ultrafast',
       '-tune',
       'stillimage',
       '-threads',
-      '2',
+      '0',
       '-movflags',
       '+faststart',
       outputVideo,

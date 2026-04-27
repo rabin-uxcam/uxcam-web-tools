@@ -53,8 +53,8 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 	}
 
 	// c) Resolve dimensions
-	const { maxW, maxH, hasVaryingSizes } = await resolveDimensions(allFrames)
-	console.log(`[bin-processor] ${allFrames.length} frames, ${maxW}x${maxH}${hasVaryingSizes ? ' (varying)' : ''}`)
+	const { maxW, maxH } = await resolveDimensions(allFrames)
+	console.log(`[bin-processor] ${allFrames.length} frames, ${maxW}x${maxH}`)
 
 	// d) Build effective timeline
 	const effectiveTimes = buildEffectiveTimeline(allFrames)
@@ -64,7 +64,7 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 	mkdirSync(workDir, { recursive: true })
 
 	try {
-		await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
+		await writeFrames(allFrames, workDir)
 
 		// f) Build concat.txt — use end-marker to hold the last frame until session end
 		const lastFrameHoldMs = computeLastFrameHoldMs(allFrames, endMarkerTime)
@@ -74,7 +74,7 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 		// g) FFmpeg encode
 		const outputVideo = join(outputDir, `${sessionId}-bin`, `${sessionId}.mp4`)
 		console.log('[bin-processor] Starting FFmpeg encode')
-		await runFfmpeg(concatPath, outputVideo)
+		await runFfmpeg(concatPath, outputVideo, maxW, maxH)
 		console.log('[bin-processor] FFmpeg encode complete')
 
 		const videoSizeBytes = statSync(outputVideo).size
@@ -83,7 +83,7 @@ export async function processBin(batchBuffers, sessionId, outputDir) {
 			videoPath: outputVideo,
 			frameCount: allFrames.length,
 			videoSizeBytes,
-			dimensions: { width: maxW, height: maxH, hasVaryingSizes },
+			dimensions: { width: maxW, height: maxH },
 		}
 	} finally {
 		// h) Cleanup frames (keep the .mp4)
@@ -213,9 +213,7 @@ async function resolveDimensions(allFrames) {
 	if (maxW % 2 !== 0) maxW++
 	if (maxH % 2 !== 0) maxH++
 
-	const hasVaryingSizes = allFrames.some((f) => f.width !== allFrames[0].width || f.height !== allFrames[0].height)
-
-	return { maxW, maxH, hasVaryingSizes }
+	return { maxW, maxH }
 }
 
 // ─── Timeline (mirrors bin-processor.ts buildEffectiveTimeline) ──────────────
@@ -230,14 +228,7 @@ function buildEffectiveTimeline(allFrames) {
 
 // ─── Frame writing (mirrors bin-processor.ts writeFrames) ────────────────────
 
-async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
-	// Resize when sizes vary OR when any source frame has odd dimensions
-	// (maxW/maxH are already rounded to even by resolveDimensions)
-	const needsResize = hasVaryingSizes || allFrames.some((f) => f.width % 2 !== 0 || f.height % 2 !== 0)
-
-	// Cache filler background — same for every padded frame, no need to regenerate
-	let cachedFillerBg = null
-
+async function writeFrames(allFrames, workDir) {
 	for (let i = 0; i < allFrames.length; i++) {
 		const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
 
@@ -246,31 +237,7 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 			continue
 		}
 
-		if (needsResize) {
-			const frame = allFrames[i]
-			const padBottom = Math.max(0, maxH - frame.height)
-			const padRight = Math.max(0, maxW - frame.width)
-
-			if (padBottom > 0 || padRight > 0) {
-				if (!cachedFillerBg) {
-					cachedFillerBg = await sharp({
-						create: { width: maxW, height: maxH, channels: 3, background: { r: 193, g: 195, b: 197 } },
-					})
-						.webp()
-						.toBuffer()
-				}
-
-				await sharp(cachedFillerBg)
-					.composite([{ input: frame.data, top: 0, left: 0 }])
-					.webp({ quality: FRAME_QUALITY })
-					.toFile(framePath)
-			} else {
-				// Frame matches max dimensions but may have odd dimensions — just re-encode
-				await sharp(frame.data).webp({ quality: FRAME_QUALITY }).toFile(framePath)
-			}
-		} else {
-			writeFileSync(framePath, allFrames[i].data)
-		}
+		writeFileSync(framePath, allFrames[i].data)
 
 		// Release frame buffer after writing — reduces memory for long sessions
 		allFrames[i].data = Buffer.alloc(0)
@@ -297,7 +264,7 @@ function buildConcatFile(frameCount, workDir, effectiveTimes, lastFrameHoldMs) {
 
 // ─── FFmpeg (mirrors bin-processor.ts runFfmpeg) ─────────────────────────────
 
-function runFfmpeg(concatPath, outputVideo) {
+function runFfmpeg(concatPath, outputVideo, maxW, maxH) {
 	return new Promise((resolve, reject) => {
 		const args = [
 		  '-y',
@@ -311,18 +278,18 @@ function runFfmpeg(concatPath, outputVideo) {
         concatPath,
         '-c:v',
         'libx264',
-        '-pix_fmt',
-        'yuv420p',
+        '-vf',
+        `pad=${maxW}:${maxH}:0:0:color=0xC1C3C5,format=yuv420p`,
         '-vsync',
         'vfr',
         '-crf',
-        '28',
+        '32',
         '-preset',
-        'fast',
+        'ultrafast',
         '-tune',
         'stillimage',
         '-threads',
-        '2',
+        '0',
         '-movflags',
         '+faststart',
         outputVideo,
