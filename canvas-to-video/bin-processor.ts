@@ -18,6 +18,7 @@ import { DevicePlatform } from '../models/device'
 import { isQueryTimeoutError, PgRepository } from '../respository/pg'
 import { CacheRepository } from '../respository/cache'
 import { config } from '../config'
+import { LogArgument } from 'rollbar'
 
 export interface BatchBuffer {
   name: string
@@ -36,6 +37,7 @@ export interface BinProcessingService {
 }
 
 const LAST_FRAME_HOLD_MS = 500
+const FRAME_QUALITY = 80
 
 export function BinProcessingService(
   s3Service: S3Service,
@@ -50,6 +52,8 @@ export function BinProcessingService(
 
   async function process(batchBuffers: BatchBuffer[], orgId: MongoId, appId: MongoId, sessionId: MongoId, bucket: string): Promise<void> {
     const log = logger.child({ orgId, appId, sessionId })
+    const startTime = Date.now()
+    log.info({ batchCount: batchBuffers.length, bucket }, 'Bin processing started')
 
     // a) Parse batch buffers → frames
     const allFrames = parseBatchBuffers(batchBuffers)
@@ -73,6 +77,7 @@ export function BinProcessingService(
     mkdirSync(workDir, { recursive: true })
 
     try {
+      log.info({ frameQuality: FRAME_QUALITY }, 'Writing frames to disk with quality setting')
       await writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes)
 
       // f) Build concat.txt
@@ -105,9 +110,9 @@ export function BinProcessingService(
       // 2. Mark video as available in Citus (PG)
       try {
         await pgRepository.markVideoAsAvailable(toStringId(appId), toStringId(sessionId), uploadedTime)
-      } catch (error) {
-        log.error(error, 'Error while updating session row to mark video as available')
-        if (isQueryTimeoutError(error)) {
+      } catch (error: any) {
+        log.error(error as Error, 'Error while updating session row to mark video as available')
+        if (isQueryTimeoutError(error as Error)) {
           throw new QueryReadTimeoutError()
         }
         throw error
@@ -117,7 +122,7 @@ export function BinProcessingService(
       try {
         log.info('Adding video to BF')
         await cacheRepository.setVideoAlreadyProcessed(sessionId)
-      } catch (error) {
+      } catch (error: any) {
         const msg = 'Error while adding video to BF'
         log.error({ error }, msg)
         rollbar.error({ error, orgId, appId, sessionId }, msg)
@@ -133,9 +138,9 @@ export function BinProcessingService(
       try {
         log.info({ stream: videoStream }, 'Pushing sessionvideo to kinesis')
         await kinesisService.putRecord<SessionVideoRecord>(videoStream, sessionVideo, 'sessionvideo')
-      } catch (error) {
+      } catch (error: any) {
         const msg = 'Failed to push session replay json to kinesis'
-        rollbar.error(msg, error, { orgId, appId, sessionId })
+        rollbar.error(msg, error as LogArgument, { orgId, appId, sessionId })
         log.error({ error }, msg)
       }
 
@@ -143,11 +148,12 @@ export function BinProcessingService(
       log.info('Increasing video count')
       try {
         await statsService.incrementOrganizationVideoCount(orgId, appId, 1, DevicePlatform.Web)
-      } catch (error) {
+      } catch (error: any) {
         const msg = 'Error while incrementing processed video count'
-        rollbar.error(error, msg, { appId, sessionId, orgId })
-        log.error(error, msg)
+        rollbar.error(msg, error as LogArgument, { appId, sessionId, orgId })
+        log.error({ err: error as Error }, msg)
       }
+      log.info({ totalDurationMs: Date.now() - startTime, frameCount: allFrames.length }, 'Bin processing completed')
     } finally {
       // i) Cleanup
       await deleteFolder(workDir)
@@ -192,8 +198,8 @@ function parseBatchBuffers(batchBuffers: BatchBuffer[]): ParsedFrame[] {
       }
 
       log.info({ name, framesExtracted: meta.length }, 'Parsed batch buffer')
-    } catch (err) {
-      log.warn({ name, error: (err as Error).message }, 'Failed to parse batch buffer, skipping')
+    } catch (err: any) {
+      log.warn({ name, bufferSize: buffer.length, error: (err as Error).message }, 'Failed to parse batch buffer, skipping')
     }
   }
 
@@ -251,6 +257,9 @@ async function writeFrames(allFrames: ParsedFrame[], workDir: string, maxW: numb
   // (maxW/maxH are already rounded to even by resolveDimensions)
   const needsResize = hasVaryingSizes || allFrames.some((f) => f.width % 2 !== 0 || f.height % 2 !== 0)
 
+  // Cache filler background — same for every padded frame, no need to regenerate
+  let cachedFillerBg: Buffer | null = null
+
   for (let i = 0; i < allFrames.length; i++) {
     const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
 
@@ -260,43 +269,28 @@ async function writeFrames(allFrames: ParsedFrame[], workDir: string, maxW: numb
       const padRight = Math.max(0, maxW - frame.width)
 
       if (padBottom > 0 || padRight > 0) {
-        // Center text in the larger visible gray strip (bottom or right)
-        const bottomArea = maxW * padBottom
-        const rightArea = padRight * frame.height
-        let textX: number, textY: number
-        if (bottomArea >= rightArea) {
-          // Center in bottom strip
-          textX = maxW / 2
-          textY = frame.height + padBottom / 2
-        } else {
-          // Center in right strip
-          textX = frame.width + padRight / 2
-          textY = frame.height / 2
+        if (!cachedFillerBg) {
+          cachedFillerBg = await sharp({
+            create: { width: maxW, height: maxH, channels: 3, background: { r: 193, g: 195, b: 197 } },
+          })
+            .webp()
+            .toBuffer()
         }
-        const fillerSvg = Buffer.from(
-          `<svg width="${maxW}" height="${maxH}" xmlns="http://www.w3.org/2000/svg">
-						<rect width="${maxW}" height="${maxH}" fill="rgb(193,195,197)"/>
-						<text x="${textX}" y="${textY}"
-							font-family="Arial, sans-serif" font-size="24" font-weight="bold"
-							fill="#ffffff" text-anchor="middle" dominant-baseline="middle">
-							Window Resized
-						</text>
-					</svg>`,
-        )
-        const fillerBg = await sharp(fillerSvg).webp().toBuffer()
 
-        // Composite the actual frame on top of the gray filler
-        await sharp(fillerBg)
+        await sharp(cachedFillerBg)
           .composite([{ input: frame.data, top: 0, left: 0 }])
-          .webp({ quality: 100 })
+          .webp({ quality: FRAME_QUALITY })
           .toFile(framePath)
       } else {
         // Frame matches max dimensions but may have odd dimensions — just re-encode
-        await sharp(frame.data).webp({ quality: 100 }).toFile(framePath)
+        await sharp(frame.data).webp({ quality: FRAME_QUALITY }).toFile(framePath)
       }
     } else {
       writeFileSync(framePath, allFrames[i].data)
     }
+
+    // Release frame buffer after writing — reduces memory for long sessions
+    allFrames[i].data = Buffer.alloc(0)
   }
 }
 
@@ -320,6 +314,8 @@ function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: st
   return new Promise((resolve, reject) => {
     const args = [
       '-y',
+      '-fflags',
+      '+genpts',
       '-f',
       'concat',
       '-safe',
@@ -335,9 +331,11 @@ function runFfmpeg(ffmpegBinaryPath: string, concatPath: string, outputVideo: st
       '-crf',
       '28',
       '-preset',
-      'slower',
+      'fast',
       '-tag:v',
       'hvc1',
+      '-x265-params',
+      'keyint=60:min-keyint=30',
       '-movflags',
       '+faststart',
       outputVideo,

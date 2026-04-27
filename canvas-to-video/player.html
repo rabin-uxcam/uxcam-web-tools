@@ -100,6 +100,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .bench-table .size-badge.smallest { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
 .bench-video-cell video { max-width: 280px; max-height: 160px; border-radius: 4px; cursor: pointer; background: #000; }
 .bench-error { color: #e74c3c; font-size: 12px; }
+
+/* Bin Benchmark intro */
+.bb-intro { padding: 24px; color: #aaa; font-size: 13px; line-height: 1.7; }
+.bb-intro code { background: #0f3460; padding: 2px 6px; border-radius: 3px; color: #5dade2; }
+.bb-intro ul { margin: 8px 0 0 20px; }
+.bb-intro li { margin: 4px 0; }
+.bench-table .mem-warn { color: #e74c3c; font-weight: 600; }
+.bench-table .mem-ok { color: #2ecc71; }
+.bench-table .fastest td { background: rgba(93, 173, 226, 0.08); }
+.bench-table .size-badge.fastest-badge { background: rgba(93, 173, 226, 0.2); color: #5dade2; }
+.bench-table .size-badge.mem-ok-badge { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
+.bench-table .size-badge.mem-warn-badge { background: rgba(231, 76, 60, 0.2); color: #e74c3c; }
+.bb-summary { padding: 12px 16px; background: #0f3460; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+.bb-summary strong { color: #5dade2; }
 </style>
 </head>
 <body>
@@ -109,6 +123,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 	<div class="tab active" data-tab="player">Player</div>
 	<div class="tab" data-tab="bin-processor">Bin Processor</div>
 	<div class="tab" data-tab="benchmark">Benchmark</div>
+	<div class="tab" data-tab="bin-benchmark">Bin Benchmark</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
@@ -239,6 +254,44 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 </div>
 
 </div><!-- /panel-bin-processor -->
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- Bin Benchmark tab — optimization variant comparison -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="tab-panel" id="panel-bin-benchmark">
+
+<div class="header">
+	<label>MinIO:</label>
+	<input type="text" id="bbMinioUrl" value="http://localhost:9000" placeholder="MinIO endpoint">
+	<button id="bbListBtn">List</button>
+	<label>Session:</label>
+	<select id="bbSessionSelect"><option value="">-- click List --</option></select>
+	<button id="bbRunBtn" disabled>Run Optimization Benchmark</button>
+	<span class="status" id="bbStatus"></span>
+</div>
+
+<div class="bench-content">
+	<div class="bench-loading hidden" id="bbLoading">
+		<div class="spinner"></div>
+		<div class="progress-text" id="bbLoadingText">Running all optimization variants...</div>
+	</div>
+	<div class="bench-results" id="bbResults">
+		<div class="bb-intro">
+			<p>Compares optimization variants of the production <code>bin-processor.ts</code> pipeline.</p>
+			<p>Each variant runs sequentially to ensure fair comparison. Metrics tracked:</p>
+			<ul>
+				<li><strong>Encoding Time</strong> — wall clock from parse to video output</li>
+				<li><strong>Node Peak RSS</strong> — max resident set size of the Node.js process</li>
+				<li><strong>FFmpeg Peak RSS</strong> — max RSS of the FFmpeg child process (via PID monitoring)</li>
+				<li><strong>Estimated Total Peak</strong> — Node + FFmpeg combined (maps to container memory limit)</li>
+				<li><strong>Video Size</strong> — output MP4 file size</li>
+			</ul>
+			<p style="color:#888;margin-top:8px;">Target: CPU 2000m / Memory 2000Mi</p>
+		</div>
+	</div>
+</div>
+
+</div><!-- /panel-bin-benchmark -->
 
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1423,6 +1476,172 @@ document.getElementById('binTimelineWrap').addEventListener('click', (e) => {
 		binSeekTo(pct * (binVideo.duration || 0));
 	});
 	document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bin Benchmark tab — optimization variant comparison
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MEM_LIMIT_MB = 2000; // Target container memory limit
+
+document.getElementById('bbListBtn').addEventListener('click', bbListSessions);
+
+async function bbListSessions() {
+	const select = document.getElementById('bbSessionSelect');
+	select.innerHTML = '<option value="">Loading...</option>';
+	document.getElementById('bbStatus').textContent = 'Listing sessions...';
+
+	try {
+		const canvasXml = await minioList('sessions/canvas/', '/', 'bbMinioUrl');
+		const prefixes = [...canvasXml.querySelectorAll('CommonPrefixes > Prefix')];
+		select.innerHTML = '';
+
+		if (prefixes.length === 0) {
+			select.innerHTML = '<option value="">No sessions found</option>';
+			document.getElementById('bbStatus').textContent = 'No sessions found';
+			return;
+		}
+
+		prefixes.forEach(p => {
+			const sid = p.textContent.replace('sessions/canvas/', '').replace(/\/$/, '');
+			const opt = document.createElement('option');
+			opt.value = sid;
+			opt.textContent = sid;
+			select.appendChild(opt);
+		});
+		select.selectedIndex = select.options.length - 1;
+		document.getElementById('bbRunBtn').disabled = false;
+		document.getElementById('bbStatus').textContent = `Found ${prefixes.length} session(s)`;
+	} catch (e) {
+		select.innerHTML = '<option value="">Error</option>';
+		document.getElementById('bbStatus').textContent = `Error: ${e.message}`;
+	}
+}
+
+document.getElementById('bbRunBtn').addEventListener('click', bbRunBenchmark);
+
+async function bbRunBenchmark() {
+	const sessionId = document.getElementById('bbSessionSelect').value;
+	if (!sessionId) return;
+
+	const minioUrl = document.getElementById('bbMinioUrl').value.replace(/\/+$/, '');
+	const loadingEl = document.getElementById('bbLoading');
+	const resultsEl = document.getElementById('bbResults');
+
+	loadingEl.classList.remove('hidden');
+	resultsEl.innerHTML = '';
+	document.getElementById('bbRunBtn').disabled = true;
+	document.getElementById('bbStatus').textContent = 'Running all optimization variants (this may take a while)...';
+
+	try {
+		const resp = await fetch('/benchmark-bin', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ sessionId, minioUrl }),
+		});
+		const data = await resp.json();
+
+		if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+
+		loadingEl.classList.add('hidden');
+		bbRenderResults(data);
+		document.getElementById('bbStatus').textContent =
+			`Complete: ${data.results.length} variants compared for session ${sessionId}`;
+	} catch (e) {
+		loadingEl.classList.add('hidden');
+		document.getElementById('bbStatus').textContent = `Error: ${e.message}`;
+	} finally {
+		document.getElementById('bbRunBtn').disabled = false;
+	}
+}
+
+function bbRenderResults(data) {
+	const container = document.getElementById('bbResults');
+	const results = data.results;
+
+	// Find best metrics for highlighting
+	const successful = results.filter(r => r.metrics);
+	if (successful.length === 0) {
+		container.innerHTML = '<p style="color:#e74c3c;padding:20px;">All variants failed.</p>';
+		return;
+	}
+
+	const fastestTime = Math.min(...successful.map(r => r.metrics.encodingTimeMs));
+	const smallestSize = Math.min(...successful.map(r => r.metrics.videoSizeBytes));
+	const lowestMem = Math.min(...successful.map(r => parseFloat(r.metrics.estimatedTotalPeakMB)));
+
+	// Summary
+	let summaryHtml = `<div class="bb-summary">`;
+	summaryHtml += `Session: <strong>${escapeHtml(data.sessionId)}</strong> | `;
+	summaryHtml += `${data.totalBins} bin files (${formatFileSize(data.totalBinSizeBytes)}) | `;
+	summaryHtml += `Target limit: <strong>${MEM_LIMIT_MB} MB</strong>`;
+	summaryHtml += `</div>`;
+
+	// Table
+	let html = summaryHtml;
+	html += `<table class="bench-table">
+		<thead><tr>
+			<th>Variant</th>
+			<th>Encoding Time</th>
+			<th>Node Peak RSS</th>
+			<th>FFmpeg Peak RSS</th>
+			<th>Total Peak</th>
+			<th>Video Size</th>
+			<th>Frames</th>
+			<th>Preview</th>
+		</tr></thead><tbody>`;
+
+	for (const r of results) {
+		if (r.error) {
+			html += `<tr>
+				<td>
+					<div class="strategy-name">${escapeHtml(r.name || r.variantId)}</div>
+					<div class="strategy-desc">${escapeHtml(r.description || '')}</div>
+				</td>
+				<td colspan="7"><span class="bench-error">${escapeHtml(r.error)}</span></td>
+			</tr>`;
+			continue;
+		}
+
+		const m = r.metrics;
+		const totalPeak = parseFloat(m.estimatedTotalPeakMB);
+		const isFastest = m.encodingTimeMs === fastestTime;
+		const isSmallestSize = m.videoSizeBytes === smallestSize;
+		const isLowestMem = totalPeak === lowestMem;
+		const exceedsLimit = totalPeak > MEM_LIMIT_MB;
+
+		let rowClass = '';
+		if (isFastest) rowClass = ' class="fastest"';
+
+		const memClass = exceedsLimit ? 'mem-warn' : 'mem-ok';
+		const memBadge = exceedsLimit
+			? ' <span class="size-badge mem-warn-badge">OOM risk</span>'
+			: (isLowestMem ? ' <span class="size-badge mem-ok-badge">lowest</span>' : '');
+
+		const timeBadge = isFastest ? ' <span class="size-badge fastest-badge">fastest</span>' : '';
+		const sizeBadge = isSmallestSize ? ' <span class="size-badge smallest">smallest</span>' : '';
+
+		const previewCell = r.videoUrl
+			? `<video src="${escapeHtml(r.videoUrl)}" preload="metadata" controls style="max-width:200px;max-height:120px;border-radius:4px;background:#000;"></video>`
+			: 'N/A';
+
+		html += `<tr${rowClass}>
+			<td>
+				<div class="strategy-name">${escapeHtml(r.name || r.variantId)}</div>
+				<div class="strategy-desc">${escapeHtml(r.description || '')}</div>
+			</td>
+			<td>${(m.encodingTimeMs / 1000).toFixed(2)}s${timeBadge}</td>
+			<td>${m.peakNodeRssMB} MB</td>
+			<td>${m.peakFfmpegRssMB} MB</td>
+			<td class="${memClass}">${m.estimatedTotalPeakMB} MB${memBadge}</td>
+			<td>${formatFileSize(m.videoSizeBytes)}${sizeBadge}</td>
+			<td>${m.frameCount}</td>
+			<td class="bench-video-cell">${previewCell}</td>
+		</tr>`;
+	}
+
+	html += '</tbody></table>';
+	container.innerHTML = html;
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

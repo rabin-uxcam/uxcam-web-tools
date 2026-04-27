@@ -8,6 +8,7 @@
  * - GET  /strategies → list all registered conversion strategies
  * - POST /convert    → convert a session with a specific strategy
  * - POST /benchmark  → convert a session with ALL strategies for comparison
+ * - POST /benchmark-bin → benchmark bin-processor optimization variants
  * - GET  /minio/*    → proxies to MinIO (avoids browser CORS issues)
  *
  * Usage:
@@ -27,6 +28,7 @@ import {
 	getAllStrategies,
 } from './index.mjs'
 import { processBin } from './bin-processor.mjs'
+import { runAllVariants, VARIANTS } from './bin-processor-variants.mjs'
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 const PORT = parseInt(process.env.PORT || '5505', 10)
@@ -294,6 +296,60 @@ async function handleConvertBin(req, res) {
 	}
 }
 
+// ─── POST /benchmark-bin — bin-processor optimization benchmark ─────────────
+
+async function handleBenchmarkBin(req, res) {
+	let body = ''
+	for await (const chunk of req) body += chunk
+
+	let params
+	try {
+		params = JSON.parse(body)
+	} catch {
+		return sendJson(res, 400, { error: 'Invalid JSON body' })
+	}
+
+	const { sessionId } = params
+	if (!sessionId) {
+		return sendJson(res, 400, { error: 'sessionId is required' })
+	}
+
+	console.log(`[benchmark-bin] Session: ${sessionId}`)
+
+	try {
+		const batchBuffers = await downloadBatchFiles(params)
+		if (!batchBuffers) {
+			return sendJson(res, 404, { error: 'No batch files found for this session' })
+		}
+
+		const totalBinSize = batchBuffers.reduce((sum, b) => sum + b.buffer.length, 0)
+		console.log(`[benchmark-bin] Downloaded ${batchBuffers.length} bins (${(totalBinSize / 1024 / 1024).toFixed(2)} MB total)`)
+		console.log(`[benchmark-bin] Running ${VARIANTS.length} variants sequentially...`)
+
+		const results = await runAllVariants(batchBuffers, sessionId, OUTPUT_DIR)
+
+		console.log(`[benchmark-bin] Complete — ${results.length} variants`)
+		sendJson(res, 200, {
+			sessionId,
+			totalBins: batchBuffers.length,
+			totalBinSizeBytes: totalBinSize,
+			variants: VARIANTS.map((v) => ({ id: v.id, name: v.name, description: v.description })),
+			results,
+		})
+	} catch (err) {
+		console.error('[benchmark-bin] Error:', err)
+		sendJson(res, 500, { error: err.message })
+	}
+}
+
+// ─── GET /benchmark-bin/variants — list available variants ─────────────────
+
+function handleListVariants(_req, res) {
+	sendJson(res, 200, {
+		variants: VARIANTS.map((v) => ({ id: v.id, name: v.name, description: v.description })),
+	})
+}
+
 // ─── GET /minio/* — proxy to MinIO ─────────────────────────────────────────
 
 async function handleMinioProxy(req, res) {
@@ -364,6 +420,16 @@ const server = createServer(async (req, res) => {
 			return await handleConvertBin(req, res)
 		}
 
+		// POST /benchmark-bin — bin-processor optimization benchmark
+		if (req.method === 'POST' && url.pathname === '/benchmark-bin') {
+			return await handleBenchmarkBin(req, res)
+		}
+
+		// GET /benchmark-bin/variants — list available variants
+		if (req.method === 'GET' && url.pathname === '/benchmark-bin/variants') {
+			return handleListVariants(req, res)
+		}
+
 		// GET /minio/* — proxy to MinIO
 		if (url.pathname.startsWith('/minio/')) {
 			return await handleMinioProxy(req, res)
@@ -425,6 +491,8 @@ server.listen(PORT, () => {
 	console.log(`  Convert:    POST http://localhost:${PORT}/convert`)
 	console.log(`  Benchmark:  POST http://localhost:${PORT}/benchmark`)
 	console.log(`  Bin-proc:   POST http://localhost:${PORT}/convert-bin`)
+	console.log(`  Bench-bin:  POST http://localhost:${PORT}/benchmark-bin`)
+	console.log(`  Variants:   GET  http://localhost:${PORT}/benchmark-bin/variants`)
 	console.log(`  MinIO proxy: http://localhost:${PORT}/minio/<host>/<path>`)
 	console.log()
 })

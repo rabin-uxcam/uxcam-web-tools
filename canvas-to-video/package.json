@@ -8,7 +8,10 @@
     "convert": "node index.mjs",
     "validate": "node validate-sync.mjs",
     "player": "open player.html",
-    "serve": "node server.mjs"
+    "serve": "node server.mjs",
+    "bench": "node docker-bench.mjs",
+    "bench:docker:build": "docker build -f Dockerfile.bench -t bin-bench .",
+    "bench:docker": "docker run --rm --cpus=2 --memory=2000m --memory-swap=2000m -v $(pwd)/output:/app/output -e MINIO_ENDPOINT=http://host.docker.internal:9000 bin-bench"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.500.0",

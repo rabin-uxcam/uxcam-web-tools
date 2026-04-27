@@ -1,0 +1,41 @@
+# Dockerfile for bin-processor benchmark with exact resource limits
+#
+# Mirrors the production environment (node + ffmpeg + sharp) and lets you
+# run each optimization variant under --cpus=2 --memory=2000m to confirm
+# it completes without OOM.
+#
+# Build:
+#   docker build -f Dockerfile.bench -t bin-bench .
+#
+# Run single variant:
+#   docker run --rm --cpus=2 --memory=2000m --memory-swap=2000m \
+#     -v $(pwd)/output:/app/output \
+#     -e MINIO_ENDPOINT=http://host.docker.internal:9000 \
+#     bin-bench node docker-bench.mjs --session <sessionId> --variant h264-fast
+#
+# Run all variants:
+#   docker run --rm --cpus=2 --memory=2000m --memory-swap=2000m \
+#     -v $(pwd)/output:/app/output \
+#     -e MINIO_ENDPOINT=http://host.docker.internal:9000 \
+#     bin-bench node docker-bench.mjs --session <sessionId>
+
+FROM node:22-alpine
+
+# Install ffmpeg
+RUN apk add --no-cache ffmpeg
+
+WORKDIR /app
+
+# Copy package files and install dependencies
+COPY package.json ./
+RUN npm install --production
+
+# Copy source files
+COPY *.mjs ./
+COPY bin-processor-variants.mjs ./
+
+# Output directory
+RUN mkdir -p /app/output
+
+ENTRYPOINT ["node", "docker-bench.mjs"]
+CMD ["--help"]
