@@ -110,11 +110,17 @@ function parseBatchBuffers(batchBuffers) {
 			const raw = decompressBuffer(buffer)
 			const { frames } = parseBatch(raw)
 
+			let skipped = 0
 			for (const f of frames) {
+				if (!f.data || f.data.length === 0) {
+					skipped++
+					continue
+				}
 				allFrames.push({ time: f.time, width: f.width, height: f.height, data: f.data })
 			}
 
-			console.log(`[bin-processor] ${name}: ${frames.length} frames extracted`)
+			const skipNote = skipped > 0 ? ` (skipped ${skipped} empty)` : ''
+			console.log(`[bin-processor] ${name}: ${frames.length - skipped} frames extracted${skipNote}`)
 		} catch (err) {
 			console.warn(`[bin-processor] Failed to parse ${name}: ${err.message} — skipping`)
 		}
@@ -243,29 +249,29 @@ function runFfmpeg(concatPath, outputVideo) {
 			'-y',
 			'-fflags',
 			'+genpts',
-			'-f',
-			'concat',
-			'-safe',
-			'0',
-			'-i',
-			concatPath,
-			'-c:v',
-			'libx265',
-			'-pix_fmt',
-			'yuv420p',
-			'-vsync',
-			'vfr',
-			'-crf',
-			'28',
-			'-preset',
-			'fast',
-			'-tag:v',
-			'hvc1',
-			'-x265-params',
-			'keyint=60:min-keyint=30',
-			'-movflags',
-			'+faststart',
-			outputVideo,
+            '-f',
+            'concat',
+            '-safe',
+            '0',
+            '-i',
+            concatPath,
+            '-c:v',
+            'libx264',
+            '-pix_fmt',
+            'yuv420p',
+            '-vsync',
+            'vfr',
+            '-crf',
+            '28',
+            '-preset',
+            'fast',
+            '-tune',
+            'stillimage',
+            '-threads',
+            '2',
+            '-movflags',
+            '+faststart',
+            outputVideo,
 		]
 
 		const result = spawn('ffmpeg', args)
