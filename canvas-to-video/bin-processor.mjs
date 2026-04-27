@@ -16,10 +16,12 @@ import { writeFileSync, mkdirSync, statSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import sharp from 'sharp'
+import { parseBatch } from './parse-batch.mjs'
 
 // ─── Constants (matching bin-processor.ts) ────────────────────────────────────
 
 const LAST_FRAME_HOLD_MS = 500
+const FRAME_QUALITY = 80
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -104,24 +106,14 @@ function parseBatchBuffers(batchBuffers) {
 		console.log(`[bin-processor] Processing ${name} (${buffer.length} bytes)`)
 
 		try {
-			// Outer decompression — S3-stored .bin files may be gzipped at the outer level
 			const raw = decompressBuffer(buffer)
+			const { frames } = parseBatch(raw)
 
-			const gzippedJsonLen = raw.readUInt32BE(0)
-			const gzippedJson = raw.subarray(4, 4 + gzippedJsonLen)
-			const jsonBytes = gunzipSync(gzippedJson)
-			const meta = JSON.parse(new TextDecoder().decode(jsonBytes))
-
-			const dataStart = 4 + gzippedJsonLen
-			let cursor = 0
-
-			for (const f of meta) {
-				const frameData = raw.subarray(dataStart + cursor, dataStart + cursor + f.sz)
-				cursor += f.sz
-				allFrames.push({ time: f.t, width: f.w, height: f.h, data: Buffer.from(frameData) })
+			for (const f of frames) {
+				allFrames.push({ time: f.time, width: f.width, height: f.height, data: f.data })
 			}
 
-			console.log(`[bin-processor] ${name}: ${meta.length} frames extracted`)
+			console.log(`[bin-processor] ${name}: ${frames.length} frames extracted`)
 		} catch (err) {
 			console.warn(`[bin-processor] Failed to parse ${name}: ${err.message} — skipping`)
 		}
@@ -187,8 +179,16 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 	// (maxW/maxH are already rounded to even by resolveDimensions)
 	const needsResize = hasVaryingSizes || allFrames.some((f) => f.width % 2 !== 0 || f.height % 2 !== 0)
 
+	// Cache filler background — same for every padded frame, no need to regenerate
+	let cachedFillerBg = null
+
 	for (let i = 0; i < allFrames.length; i++) {
 		const framePath = join(workDir, `src-${String(i).padStart(5, '0')}.webp`)
+
+		if (allFrames[i].data.length === 0) {
+			console.warn(`[bin-processor] Skipping frame ${i}: empty buffer`)
+			continue
+		}
 
 		if (needsResize) {
 			const frame = allFrames[i]
@@ -196,43 +196,28 @@ async function writeFrames(allFrames, workDir, maxW, maxH, hasVaryingSizes) {
 			const padRight = Math.max(0, maxW - frame.width)
 
 			if (padBottom > 0 || padRight > 0) {
-				// Center text in the larger visible gray strip (bottom or right)
-				const bottomArea = maxW * padBottom
-				const rightArea = padRight * frame.height
-				let textX, textY
-				if (bottomArea >= rightArea) {
-					// Center in bottom strip
-					textX = maxW / 2
-					textY = frame.height + padBottom / 2
-				} else {
-					// Center in right strip
-					textX = frame.width + padRight / 2
-					textY = frame.height / 2
+				if (!cachedFillerBg) {
+					cachedFillerBg = await sharp({
+						create: { width: maxW, height: maxH, channels: 3, background: { r: 193, g: 195, b: 197 } },
+					})
+						.webp()
+						.toBuffer()
 				}
-				const fillerSvg = Buffer.from(
-					`<svg width="${maxW}" height="${maxH}" xmlns="http://www.w3.org/2000/svg">
-						<rect width="${maxW}" height="${maxH}" fill="rgb(193,195,197)"/>
-						<text x="${textX}" y="${textY}"
-							font-family="Arial, sans-serif" font-size="24" font-weight="bold"
-							fill="#ffffff" text-anchor="middle" dominant-baseline="middle">
-							Window Resized
-						</text>
-					</svg>`
-				)
-				const fillerBg = await sharp(fillerSvg).webp().toBuffer()
 
-				// Composite the actual frame on top of the gray filler
-				await sharp(fillerBg)
+				await sharp(cachedFillerBg)
 					.composite([{ input: frame.data, top: 0, left: 0 }])
-					.webp({ quality: 100 })
+					.webp({ quality: FRAME_QUALITY })
 					.toFile(framePath)
 			} else {
 				// Frame matches max dimensions but may have odd dimensions — just re-encode
-				await sharp(frame.data).webp({ quality: 100 }).toFile(framePath)
+				await sharp(frame.data).webp({ quality: FRAME_QUALITY }).toFile(framePath)
 			}
 		} else {
 			writeFileSync(framePath, allFrames[i].data)
 		}
+
+		// Release frame buffer after writing — reduces memory for long sessions
+		allFrames[i].data = Buffer.alloc(0)
 	}
 }
 
@@ -260,6 +245,8 @@ function runFfmpeg(concatPath, outputVideo) {
 	return new Promise((resolve, reject) => {
 		const args = [
 			'-y',
+			'-fflags',
+			'+genpts',
 			'-f',
 			'concat',
 			'-safe',
@@ -275,9 +262,11 @@ function runFfmpeg(concatPath, outputVideo) {
 			'-crf',
 			'28',
 			'-preset',
-			'slower',
+			'fast',
 			'-tag:v',
 			'hvc1',
+			'-x265-params',
+			'keyint=60:min-keyint=30',
 			'-movflags',
 			'+faststart',
 			outputVideo,
