@@ -21,6 +21,7 @@ import { parseBatch } from './parse-batch.mjs'
 // ─── Constants (matching bin-processor.ts) ────────────────────────────────────
 
 const FRAME_QUALITY = 80
+const FALLBACK_LAST_FRAME_HOLD_MS = 50
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -175,8 +176,8 @@ function extractEndMarker(frames) {
 /**
  * Hold the last real frame until the session-end timestamp from the marker.
  * The marker is optional — older sessions and crashed/force-quit sessions
- * may not produce one. When absent or stale, fall back to a short constant
- * so FFmpeg gets a non-zero duration for the final frame.
+ * may not produce one. If the last real frame's timestamp is past the marker
+ * (late frame after marker was queued), the frame wins and we fall back.
  */
 function computeLastFrameHoldMs(allFrames, endMarkerTime) {
 	if (endMarkerTime !== null) {
@@ -185,7 +186,7 @@ function computeLastFrameHoldMs(allFrames, endMarkerTime) {
 		if (holdMs > 0) return holdMs
 		console.warn(`[bin-processor] End-marker (${endMarkerTime}) not after last frame (${lastFrameTime}) — using fallback`)
 	}
-	return 50
+	return FALLBACK_LAST_FRAME_HOLD_MS
 }
 
 // ─── Dimension resolution (mirrors bin-processor.ts resolveDimensions) ───────

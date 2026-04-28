@@ -36,7 +36,7 @@ export interface BinProcessingService {
   process(batchBuffers: BatchBuffer[], orgId: MongoId, appId: MongoId, sessionId: MongoId, bucket: string): Promise<void>
 }
 
-const LAST_FRAME_HOLD_MS = 500
+const FALLBACK_LAST_FRAME_HOLD_MS = 50
 const FRAME_QUALITY = 80
 
 export function BinProcessingService(
@@ -56,14 +56,20 @@ export function BinProcessingService(
     log.info({ batchCount: batchBuffers.length, bucket }, 'Bin processing started')
 
     // a) Parse batch buffers → frames
-    const allFrames = parseBatchBuffers(batchBuffers)
-    if (allFrames.length === 0) {
+    const parsedFrames = parseBatchBuffers(batchBuffers)
+    if (parsedFrames.length === 0) {
       log.info('No frames found in batch buffers, returning')
       return
     }
 
-    // b) Sort frames by timestamp
-    allFrames.sort((a, b) => a.time - b.time)
+    // b) Sort by timestamp, then split out end-markers (sz=0 sentinel frames)
+    parsedFrames.sort((a, b) => a.time - b.time)
+    const { allFrames, endMarkerTime } = extractEndMarker(parsedFrames, log)
+
+    if (allFrames.length === 0) {
+      log.info('Only end markers found (no real frames), returning')
+      return
+    }
 
     // c) Resolve dimensions
     const { maxW, maxH } = await resolveDimensions(allFrames)
@@ -80,9 +86,10 @@ export function BinProcessingService(
       log.info({ frameQuality: FRAME_QUALITY }, 'Writing frames to disk with quality setting')
       await writeFrames(allFrames, workDir)
 
-      // f) Build concat.txt
+      // f) Build concat.txt — use end-marker to hold last frame until session end
+      const lastFrameHoldMs = computeLastFrameHoldMs(allFrames, endMarkerTime, log)
       const concatPath = join(workDir, 'concat.txt')
-      writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes), 'utf-8')
+      writeFileSync(concatPath, buildConcatFile(allFrames.length, workDir, effectiveTimes, lastFrameHoldMs), 'utf-8')
 
       // g) FFmpeg encode
       const outputVideo = join(workDir, `${sessionId}.mp4`)
@@ -242,6 +249,39 @@ async function resolveDimensions(allFrames: ParsedFrame[]): Promise<{ maxW: numb
   return { maxW, maxH }
 }
 
+function extractEndMarker(frames: ParsedFrame[], log: ReturnType<typeof createLogger>): { allFrames: ParsedFrame[]; endMarkerTime: number | null } {
+  const realFrames: ParsedFrame[] = []
+  let endMarkerTime: number | null = null
+  let markerCount = 0
+
+  for (const f of frames) {
+    if (f.data.length === 0) {
+      markerCount++
+      if (endMarkerTime === null || f.time > endMarkerTime) {
+        endMarkerTime = f.time
+      }
+    } else {
+      realFrames.push(f)
+    }
+  }
+
+  if (markerCount > 0) {
+    log.info({ markerCount, endMarkerTime }, 'End-marker(s) found; using latest as session end')
+  }
+
+  return { allFrames: realFrames, endMarkerTime }
+}
+
+function computeLastFrameHoldMs(allFrames: ParsedFrame[], endMarkerTime: number | null, log: ReturnType<typeof createLogger>): number {
+  if (endMarkerTime !== null) {
+    const lastFrameTime = allFrames[allFrames.length - 1].time
+    const holdMs = endMarkerTime - lastFrameTime
+    if (holdMs > 0) return holdMs
+    log.warn({ endMarkerTime, lastFrameTime }, 'End-marker not after last frame — using fallback hold')
+  }
+  return FALLBACK_LAST_FRAME_HOLD_MS
+}
+
 function buildEffectiveTimeline(allFrames: ParsedFrame[]): number[] {
   const effectiveTimes = [0]
   for (let i = 1; i < allFrames.length; i++) {
@@ -260,11 +300,11 @@ async function writeFrames(allFrames: ParsedFrame[], workDir: string): Promise<v
   }
 }
 
-function buildConcatFile(frameCount: number, workDir: string, effectiveTimes: number[]): string {
+function buildConcatFile(frameCount: number, workDir: string, effectiveTimes: number[], lastFrameHoldMs: number): string {
   const lines = ['ffconcat version 1.0']
 
   for (let i = 0; i < frameCount; i++) {
-    const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : LAST_FRAME_HOLD_MS / 1000
+    const durationSec = i + 1 < frameCount ? (effectiveTimes[i + 1] - effectiveTimes[i]) / 1000 : lastFrameHoldMs / 1000
 
     lines.push(`file ${join(workDir, `src-${String(i).padStart(5, '0')}.webp`)}`)
     lines.push(`duration ${durationSec.toFixed(6)}`)

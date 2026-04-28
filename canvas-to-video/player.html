@@ -100,6 +100,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 .bench-table .size-badge.smallest { background: rgba(46, 204, 113, 0.2); color: #2ecc71; }
 .bench-video-cell video { max-width: 280px; max-height: 160px; border-radius: 4px; cursor: pointer; background: #000; }
 .bench-error { color: #e74c3c; font-size: 12px; }
+
+/* ─── Duration comparison bar ────────────────────────────────────────────── */
+.duration-bar { display: flex; align-items: center; gap: 24px; padding: 8px 16px; background: #0f1a30; border-bottom: 1px solid #0f3460; font-size: 12px; }
+.duration-bar .item { display: flex; align-items: center; gap: 6px; }
+.duration-bar .label { color: #888; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+.duration-bar .value { color: #e0e0e0; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.duration-bar .delta.match { color: #2ecc71; }
+.duration-bar .delta.warn { color: #f39c12; }
+.duration-bar .delta.bad { color: #e74c3c; }
 </style>
 </head>
 <body>
@@ -126,6 +135,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 	<select id="dataSelect"><option value="">-- click List --</option></select>
 	<button id="loadBtn" disabled>Load</button>
 	<span class="status" id="statusText"></span>
+</div>
+
+<div class="duration-bar" id="durationBar">
+	<div class="item"><span class="label">data.json (tt):</span><span class="value" id="dataDuration">—</span></div>
+	<div class="item"><span class="label">Video:</span><span class="value" id="videoDuration">—</span></div>
+	<div class="item"><span class="label">Δ:</span><span class="value delta" id="durationDelta">—</span></div>
+	<div class="item"><span class="label">Ratio:</span><span class="value" id="durationRatio">—</span></div>
 </div>
 
 <div class="main">
@@ -203,6 +219,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monos
 	<select id="binDataSelect"><option value="">-- click List --</option></select>
 	<button id="binLoadBtn" disabled>Convert &amp; Play</button>
 	<span class="status" id="binStatus"></span>
+</div>
+
+<div class="duration-bar" id="binDurationBar">
+	<div class="item"><span class="label">data.json (tt):</span><span class="value" id="binDataDuration">—</span></div>
+	<div class="item"><span class="label">Video:</span><span class="value" id="binVideoDuration">—</span></div>
+	<div class="item"><span class="label">Δ:</span><span class="value delta" id="binDurationDelta">—</span></div>
+	<div class="item"><span class="label">Ratio:</span><span class="value" id="binDurationRatio">—</span></div>
 </div>
 
 <div class="main">
@@ -491,6 +514,8 @@ function setupPlayer() {
 	updateTimeDisplay();
 	updateOverlays();
 	startOverlaySync();
+
+	updateDurationComparison('', dataJson?.session?.tt || 0, video.duration || 0);
 }
 
 function buildTimeline() {
@@ -937,6 +962,40 @@ function hideLoading() {
 	document.getElementById('loadingOverlay').classList.add('hidden');
 }
 
+function updateDurationComparison(prefix, dataTtSec, videoDurSec) {
+	const dataEl = document.getElementById(prefix ? `${prefix}DataDuration` : 'dataDuration');
+	const videoEl = document.getElementById(prefix ? `${prefix}VideoDuration` : 'videoDuration');
+	const deltaEl = document.getElementById(prefix ? `${prefix}DurationDelta` : 'durationDelta');
+	const ratioEl = document.getElementById(prefix ? `${prefix}DurationRatio` : 'durationRatio');
+
+	const hasData = dataTtSec > 0;
+	const hasVideo = videoDurSec > 0;
+
+	dataEl.textContent = hasData ? `${dataTtSec.toFixed(2)}s` : '—';
+	videoEl.textContent = hasVideo ? `${videoDurSec.toFixed(2)}s` : '—';
+
+	deltaEl.classList.remove('match', 'warn', 'bad');
+
+	if (!hasData || !hasVideo) {
+		deltaEl.textContent = '—';
+		ratioEl.textContent = '—';
+		return;
+	}
+
+	const diff = videoDurSec - dataTtSec;
+	const absDiff = Math.abs(diff);
+	const ratio = videoDurSec / dataTtSec;
+	const sign = diff >= 0 ? '+' : '−';
+
+	deltaEl.textContent = `${sign}${absDiff.toFixed(2)}s`;
+	ratioEl.textContent = `${ratio.toFixed(3)}×`;
+
+	const pctDiff = absDiff / dataTtSec;
+	if (pctDiff < 0.02) deltaEl.classList.add('match');
+	else if (pctDiff < 0.10) deltaEl.classList.add('warn');
+	else deltaEl.classList.add('bad');
+}
+
 function formatFileSize(bytes) {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1154,6 +1213,8 @@ function binSetupPlayer() {
 	binBuildEventLog();
 	binUpdateOverlays();
 	binStartOverlaySync();
+
+	updateDurationComparison('bin', binDataJson?.session?.tt || 0, binVideo.duration || 0);
 }
 
 function binSessionToVideo(sessionTimeSec) {
